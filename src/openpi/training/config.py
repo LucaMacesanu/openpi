@@ -698,6 +698,27 @@ _CONFIGS = [
         # Turn off EMA for LoRA finetuning.
         ema_decay=None,
     ),
+    # TrainConfig(
+    #     name="pi05_libero_sft",
+    #     model=pi0_config.Pi0Config(
+    #         pi05=True,
+    #         paligemma_variant="gemma_2b_lora",
+    #         action_expert_variant="gemma_300m_lora",
+    #     ),
+    #     data=_config.LeRobotLiberoDataConfig(
+    #         repo_id="physical-intelligence/libero",
+    #         base_config=_config.DataConfig(prompt_from_task=True),
+    #         extra_delta_transform=True,
+    #     ),
+    #     weight_loader=weight_loaders.CheckpointWeightLoader(
+    #         "gs://openpi-assets/checkpoints/pi05_base/params"
+    #     ),
+    #     freeze_filter=pi0_config.Pi0Config(
+    #         paligemma_variant="gemma_2b_lora",
+    #         action_expert_variant="gemma_300m_lora",
+    #     ).get_freeze_filter(),
+    #     ema_decay=None,
+    #     ),
     TrainConfig(
         name="pi0_libero_low_mem_finetune",
         # Here is an example of loading a pi0 model for LoRA fine-tuning.

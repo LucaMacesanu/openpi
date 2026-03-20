@@ -193,10 +193,11 @@ def init_logging():
 
 # ---------------------------------------------------------------------------
 # Base config (mirrors pi05_libero_low_mem_finetune)
+# spoofing the name since its the same data, and the norms have alraedy been calcualted for that one
 # ---------------------------------------------------------------------------
 
 _BASE_CONFIG = _config.TrainConfig(
-    name="pi05_libero_sft",
+    name="pi0_libero_low_mem_finetune",
     model=pi0_config.Pi0Config(
         pi05=True,
         paligemma_variant="gemma_2b_lora",
@@ -268,78 +269,72 @@ def list_available_tasks(repo_id: str) -> list[str]:
     return list(meta.tasks.values())
 
 
-def get_task_episodes(repo_id: str, task_name: str) -> list[int]:
-    """Return the episode indices that belong to *task_name*.
-
-    Tries episodes.jsonl first (lerobot v2.1+). Falls back to scanning the
-    per-frame HF dataset for datasets in v2.0 format where task_index is
-    stored per-frame rather than per-episode.
-    """
-    meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
-    if task_name not in meta.task_to_task_index:
-        available = "\n".join(f"  - {t}" for t in sorted(meta.tasks.values()))
-        raise ValueError(
-            f"Task '{task_name}' not found in '{repo_id}'.\n"
-            f"Available tasks:\n{available}"
-        )
-    task_idx = meta.task_to_task_index[task_name]
-
-    # v2.1+: task_index is stored per-episode in episodes.jsonl
-    episodes_from_meta = [
-        ep_idx
-        for ep_idx, ep in meta.episodes.items()
-        if ep.get("task_index") == task_idx
-    ]
-    if episodes_from_meta:
-        return sorted(episodes_from_meta)
-
-    # v2.0 fallback: task_index is only in the per-frame parquet data.
-    logging.info(
-        "task_index not in episodes.jsonl (v2.0 dataset); "
-        "scanning hf_dataset to map episodes to tasks..."
-    )
-    full_dataset = lerobot_dataset.LeRobotDataset(repo_id)
-    ep_to_task: dict[int, int] = {}
-    for row in full_dataset.hf_dataset.select_columns(["episode_index", "task_index"]):
-        ep_idx = row["episode_index"]
-        if ep_idx not in ep_to_task:
-            ep_to_task[ep_idx] = row["task_index"]
-    return sorted(ep_idx for ep_idx, t_idx in ep_to_task.items() if t_idx == task_idx)
-
-
 # ---------------------------------------------------------------------------
 # Per-task data loader
 # ---------------------------------------------------------------------------
 
 def create_task_data_loader(
     config: _config.TrainConfig,
-    task_episodes: list[int],
+    task_name: str,
     data_sharding: jax.sharding.Sharding,
 ) -> _data_loader.DataLoader:
-    """Build a DataLoader restricted to the given episode indices."""
+    """Build a DataLoader containing only frames that belong to *task_name*.
+
+    Loads the FULL LeRobotDataset so that lerobot's episode_data_index covers
+    all episodes (required for correct delta-timestamp lookups), then filters
+    down to task frames using torch.utils.data.Subset before applying transforms.
+    Filtering by passing `episodes=` to LeRobotDataset fails for v2.0 datasets
+    because the sparse global episode indices exceed the dense index array size.
+    """
+    import torch.utils.data as torch_data
+
     data_config = config.data.create(config.assets_dirs, config.model)
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(data_config.repo_id)
 
-    dataset = lerobot_dataset.LeRobotDataset(
+    if task_name not in dataset_meta.task_to_task_index:
+        available = "\n".join(f"  - {t}" for t in sorted(dataset_meta.tasks.values()))
+        raise ValueError(
+            f"Task '{task_name}' not found in '{data_config.repo_id}'.\n"
+            f"Available tasks:\n{available}"
+        )
+    task_idx = dataset_meta.task_to_task_index[task_name]
+
+    # Load full dataset — no episode filter so episode_data_index spans all episodes.
+    raw_dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
-        episodes=task_episodes,
         delta_timestamps={
             key: [t / dataset_meta.fps for t in range(config.model.action_horizon)]
             for key in data_config.action_sequence_keys
         },
     )
 
+    # Inject task prompt before subsetting (transform reads task_index from each frame).
     if data_config.prompt_from_task:
-        dataset = _data_loader.TransformedDataset(
-            dataset,
+        prompted = _data_loader.TransformedDataset(
+            raw_dataset,
             [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)],
         )
+    else:
+        prompted = raw_dataset
 
-    dataset = _data_loader.transform_dataset(dataset, data_config)
+    # Find frame-level indices for this task.
+    task_frame_indices = [
+        i for i, t in enumerate(raw_dataset.hf_dataset["task_index"])
+        if int(t) == task_idx
+    ]
+    logging.info(
+        f"Task '{task_name}': {len(task_frame_indices)} frames "
+        f"(task_index={task_idx})"
+    )
+
+    # Subset to task frames; Subset.__getitem__ maps local -> global index,
+    # so raw_dataset's full episode_data_index handles lookups correctly.
+    task_dataset = torch_data.Subset(prompted, task_frame_indices)
+    task_dataset = _data_loader.transform_dataset(task_dataset, data_config)
 
     local_batch_size = config.batch_size // jax.process_count()
     loader = _data_loader.TorchDataLoader(
-        dataset,
+        task_dataset,
         local_batch_size=local_batch_size,
         sharding=data_sharding,
         shuffle=True,
@@ -490,13 +485,8 @@ def main(args: SFTArgs) -> None:
             resume=False,
         )
 
-        # Build data loader for this task's episodes.
-        task_episodes = get_task_episodes(repo_id, task_name)
-        logging.info(
-            f"Found {len(task_episodes)} episodes for task '{task_name}'"
-        )
-
-        data_loader = create_task_data_loader(config, task_episodes, data_sharding)
+        # Build data loader for this task (filters full dataset by task_index at frame level).
+        data_loader = create_task_data_loader(config, task_name, data_sharding)
         data_iter = iter(data_loader)
         batch = next(data_iter)
 
