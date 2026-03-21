@@ -14,7 +14,10 @@ from typing_extensions import override
 import tyro
 
 import openpi.models.model as _model
+import openpi.models.moe as moe
 import openpi.models.pi0_config as pi0_config
+import openpi.models.pi0_moe_config as pi0_moe_config
+import openpi.training.moe_weight_loader as moe_weight_loader
 import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
@@ -779,6 +782,31 @@ _CONFIGS = [
         optimizer=_optimizer.AdamW(weight_decay=1e-10),
         batch_size=8,
         num_train_steps=10_000,
+        ema_decay=None,
+    ),
+    # Pi0.5 MoE: action expert FFW replaced with sparse Mixture-of-Experts.
+    # Each MoE expert is initialised from the pi05_base action expert weights.
+    # Trainable params: router kernel + per-expert LoRA adapters.
+    TrainConfig(
+        name="pi05_libero_moe",
+        model=pi0_moe_config.Pi0MoEConfig(
+            pi05=True,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m_lora",
+            moe_config=moe.MoEConfig(num_experts=4, top_k=2, router_z_loss_coeff=1e-3),
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        weight_loader=moe_weight_loader.MoEWeightLoader(
+            base_loader=weight_loaders.CheckpointWeightLoader(
+                "gs://openpi-assets/checkpoints/pi05_base/params"
+            ),
+            num_experts=4,
+        ),
+        freeze_filter=pi0_moe_config.Pi0MoEConfig().get_freeze_filter(),
         ema_decay=None,
     ),
     TrainConfig(
