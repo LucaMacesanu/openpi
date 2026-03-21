@@ -28,6 +28,8 @@ TASK_SEED=42
 CUDA_DEVICES=""
 BATCH_SIZE=32
 WANDB_ENABLED=true
+CONFIG_NAME="pi05_libero_sft"
+NORM_STATS_FROM="pi0_libero_low_mem_finetune"
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.8
 
 # ---------------------------------------------------------------------------
@@ -43,6 +45,8 @@ while [[ $# -gt 0 ]]; do
         --cuda_devices)    CUDA_DEVICES="$2";    shift 2 ;;
         --batch_size)      BATCH_SIZE="$2";      shift 2 ;;
         --wandb_enabled)   WANDB_ENABLED="$2";   shift 2 ;;
+        --config_name)     CONFIG_NAME="$2";     shift 2 ;;
+        --norm_stats_from) NORM_STATS_FROM="$2"; shift 2 ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
 done
@@ -73,6 +77,8 @@ CMD=(
     --steps_per_task "$STEPS_PER_TASK"
     --checkpoint_dir "$CHECKPOINT_DIR"
     --batch_size     "$BATCH_SIZE"
+    --config_name    "$CONFIG_NAME"
+    --norm_stats_from "$NORM_STATS_FROM"
 )
 
 if [[ "$WANDB_ENABLED" == "true" ]]; then
@@ -85,6 +91,7 @@ echo "============================================================"
 echo "SFT Run Scheduler"
 echo "  Experiment  : $EXP_NAME"
 echo "  Tasks       : $NUM_TASKS (task_seed=$TASK_SEED)"
+echo "  Config      : $CONFIG_NAME"
 echo "  Steps/task  : $STEPS_PER_TASK"
 echo "  Checkpoint  : $CHECKPOINT_DIR/$EXP_NAME"
 if [[ -n "$CUDA_DEVICES" ]]; then

@@ -44,9 +44,13 @@ if [[ -z "$CHECKPOINT_DIR" || -z "$EXP_DIR" ]]; then
     exit 1
 fi
 
-TASKS_JSON="$CHECKPOINT_DIR/tasks_trained.json"
-if [[ ! -f "$TASKS_JSON" ]]; then
-    echo "Error: tasks_trained.json not found at $TASKS_JSON"
+if [[ -f "$CHECKPOINT_DIR/metadata.json" ]]; then
+    TASKS_JSON="$CHECKPOINT_DIR/metadata.json"
+elif [[ -f "$CHECKPOINT_DIR/tasks_trained.json" ]]; then
+    echo "Note: metadata.json not found, falling back to tasks_trained.json"
+    TASKS_JSON="$CHECKPOINT_DIR/tasks_trained.json"
+else
+    echo "Error: neither metadata.json nor tasks_trained.json found in $CHECKPOINT_DIR"
     exit 1
 fi
 

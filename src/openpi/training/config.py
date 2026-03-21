@@ -698,27 +698,89 @@ _CONFIGS = [
         # Turn off EMA for LoRA finetuning.
         ema_decay=None,
     ),
-    # TrainConfig(
-    #     name="pi05_libero_sft",
-    #     model=pi0_config.Pi0Config(
-    #         pi05=True,
-    #         paligemma_variant="gemma_2b_lora",
-    #         action_expert_variant="gemma_300m_lora",
-    #     ),
-    #     data=_config.LeRobotLiberoDataConfig(
-    #         repo_id="physical-intelligence/libero",
-    #         base_config=_config.DataConfig(prompt_from_task=True),
-    #         extra_delta_transform=True,
-    #     ),
-    #     weight_loader=weight_loaders.CheckpointWeightLoader(
-    #         "gs://openpi-assets/checkpoints/pi05_base/params"
-    #     ),
-    #     freeze_filter=pi0_config.Pi0Config(
-    #         paligemma_variant="gemma_2b_lora",
-    #         action_expert_variant="gemma_300m_lora",
-    #     ).get_freeze_filter(),
-    #     ema_decay=None,
-    #     ),
+    # pi05 SFT configs: PaliGemma backbone fully frozen, only action-expert LoRA adapters are trained.
+    TrainConfig(
+        name="pi05_libero_sft",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b",           # full weights, backbone frozen
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
+        # Freeze PaliGemma entirely + action-expert base weights.
+        # Only action-expert LoRA adapters (.*llm.*_1.*lora.*) remain trainable.
+        freeze_filter=nnx.Any(
+            nnx.All(nnx_utils.PathRegex(".*llm.*"), nnx.Not(nnx_utils.PathRegex(".*llm.*_1.*"))),
+            nnx.All(nnx_utils.PathRegex(".*llm.*_1.*"), nnx.Not(nnx_utils.PathRegex(".*lora.*"))),
+        ),
+        ema_decay=None,
+    ),
+    # Hyperparam variant: lower LR, higher weight decay, shorter warmup (suited for short per-task runs).
+    TrainConfig(
+        name="pi05_libero_sft_v1",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
+        freeze_filter=nnx.Any(
+            nnx.All(nnx_utils.PathRegex(".*llm.*"), nnx.Not(nnx_utils.PathRegex(".*llm.*_1.*"))),
+            nnx.All(nnx_utils.PathRegex(".*llm.*_1.*"), nnx.Not(nnx_utils.PathRegex(".*lora.*"))),
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=100,       # 10% of 1k steps
+            peak_lr=5e-5,
+            decay_steps=1_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(weight_decay=0.075),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="huihan_config",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
+        freeze_filter=nnx.Any(
+            nnx.All(nnx_utils.PathRegex(".*llm.*"), nnx.Not(nnx_utils.PathRegex(".*llm.*_1.*"))),
+            nnx.All(nnx_utils.PathRegex(".*llm.*_1.*"), nnx.Not(nnx_utils.PathRegex(".*lora.*"))),
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=2.5e-5,
+            decay_steps=10_000,
+            decay_lr=2.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(weight_decay=1e-10),
+        batch_size=8,
+        num_train_steps=10_000,
+        ema_decay=None,
+    ),
     TrainConfig(
         name="pi0_libero_low_mem_finetune",
         # Here is an example of loading a pi0 model for LoRA fine-tuning.

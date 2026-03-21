@@ -192,33 +192,7 @@ def init_logging():
     logger.handlers[0].setFormatter(formatter)
 
 # ---------------------------------------------------------------------------
-# Base config (mirrors pi05_libero_low_mem_finetune)
-# spoofing the name since its the same data, and the norms have alraedy been calcualted for that one
 # ---------------------------------------------------------------------------
-
-_BASE_CONFIG = _config.TrainConfig(
-    name="pi0_libero_low_mem_finetune",
-    model=pi0_config.Pi0Config(
-        pi05=True,
-        paligemma_variant="gemma_2b",          # frozen — no LoRA needed
-        action_expert_variant="gemma_300m_lora",
-    ),
-    data=_config.LeRobotLiberoDataConfig(
-        repo_id="physical-intelligence/libero",
-        base_config=_config.DataConfig(prompt_from_task=True),
-        extra_delta_transform=True,
-    ),
-    weight_loader=weight_loaders.CheckpointWeightLoader(
-        "gs://openpi-assets/checkpoints/pi05_base/params"
-    ),
-    # Freeze PaliGemma entirely + action expert base weights.
-    # Only action expert LoRA adapters (.*llm.*_1.*lora.*) are trainable.
-    freeze_filter=nnx.Any(
-        nnx.All(nnx_utils.PathRegex(".*llm.*"), nnx.Not(nnx_utils.PathRegex(".*llm.*_1.*"))),
-        nnx.All(nnx_utils.PathRegex(".*llm.*_1.*"), nnx.Not(nnx_utils.PathRegex(".*lora.*"))),
-    ),
-    ema_decay=None,
-)
 
 
 
@@ -242,6 +216,14 @@ class SFTArgs:
 
     # Number of gradient steps to train on each task.
     steps_per_task: int = 5_000
+
+    # Named config to use as the base training config.
+    config_name: str = "pi05_libero_sft"
+
+    # Config name whose precomputed norm stats to use. Defaults to pi05_libero_low_mem_finetune
+    # since all SFT configs share the same dataset and embodiment. Only change this if you have
+    # computed norm stats for a different config.
+    norm_stats_from: str = "pi0_libero_low_mem_finetune"
 
     # Experiment name — used for W&B run name and the parent checkpoint subdirectory.
     exp_name: str = "sft_run"
@@ -357,16 +339,22 @@ def create_task_data_loader(
 # Checkpoint metadata
 # ---------------------------------------------------------------------------
 
-def save_task_metadata(task_ckpt_dir: Path, tasks_trained: list[str]) -> None:
-    """Write tasks_trained.json alongside the orbax checkpoint directory."""
+def save_metadata(task_ckpt_dir: Path, tasks_trained: list[str], args: "SFTArgs", base_config) -> None:
+    """Write metadata.json alongside the orbax checkpoint directory."""
     metadata = {
         "tasks_trained": tasks_trained,
         "num_tasks_trained": len(tasks_trained),
+        "config": {
+            "name": args.config_name,
+            "paligemma_variant": base_config.model.paligemma_variant,
+            "action_expert_variant": base_config.model.action_expert_variant,
+            "steps_per_task": args.steps_per_task,
+            "batch_size": args.batch_size,
+            "seed": args.seed,
+        },
     }
-    (task_ckpt_dir / "tasks_trained.json").write_text(
-        json.dumps(metadata, indent=2)
-    )
-    logging.info(f"Saved task metadata to {task_ckpt_dir / 'tasks_trained.json'}")
+    (task_ckpt_dir / "metadata.json").write_text(json.dumps(metadata, indent=2))
+    logging.info(f"Saved metadata to {task_ckpt_dir / 'metadata.json'}")
 
 
 # ---------------------------------------------------------------------------
@@ -377,7 +365,11 @@ def main(args: SFTArgs) -> None:
     init_logging()
     logging.info(f"Running on: {platform.node()}")
 
-    repo_id = _BASE_CONFIG.data.repo_id
+    base_config = _config.get_config(args.config_name)
+    # Override the config name to point assets_dirs at an existing norm stats folder.
+    # All SFT configs share the same dataset/embodiment so norms are interchangeable.
+    base_config = dataclasses.replace(base_config, name=args.norm_stats_from)
+    repo_id = base_config.data.repo_id
 
     # --list_tasks: just print and exit.
     if args.list_tasks:
@@ -413,7 +405,7 @@ def main(args: SFTArgs) -> None:
     # Build a config with CLI overrides applied.
     # exp_name is set to a placeholder here; checkpoint dirs are managed manually.
     config = dataclasses.replace(
-        _BASE_CONFIG,
+        base_config,
         exp_name=args.exp_name,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
@@ -552,7 +544,7 @@ def main(args: SFTArgs) -> None:
 
         # Record this task and write cumulative metadata.
         tasks_trained_so_far.append(task_name)
-        save_task_metadata(task_ckpt_dir, list(tasks_trained_so_far))
+        save_metadata(task_ckpt_dir, list(tasks_trained_so_far), args, base_config)
 
         logging.info(
             f"Checkpoint saved: {task_ckpt_dir}\n"
