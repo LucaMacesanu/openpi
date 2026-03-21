@@ -200,7 +200,7 @@ _BASE_CONFIG = _config.TrainConfig(
     name="pi0_libero_low_mem_finetune",
     model=pi0_config.Pi0Config(
         pi05=True,
-        paligemma_variant="gemma_2b_lora",
+        paligemma_variant="gemma_2b",          # frozen — no LoRA needed
         action_expert_variant="gemma_300m_lora",
     ),
     data=_config.LeRobotLiberoDataConfig(
@@ -211,10 +211,12 @@ _BASE_CONFIG = _config.TrainConfig(
     weight_loader=weight_loaders.CheckpointWeightLoader(
         "gs://openpi-assets/checkpoints/pi05_base/params"
     ),
-    freeze_filter=pi0_config.Pi0Config(
-        paligemma_variant="gemma_2b_lora",
-        action_expert_variant="gemma_300m_lora",
-    ).get_freeze_filter(),
+    # Freeze PaliGemma entirely + action expert base weights.
+    # Only action expert LoRA adapters (.*llm.*_1.*lora.*) are trainable.
+    freeze_filter=nnx.Any(
+        nnx.All(nnx_utils.PathRegex(".*llm.*"), nnx.Not(nnx_utils.PathRegex(".*llm.*_1.*"))),
+        nnx.All(nnx_utils.PathRegex(".*llm.*_1.*"), nnx.Not(nnx_utils.PathRegex(".*lora.*"))),
+    ),
     ema_decay=None,
 )
 
@@ -228,8 +230,15 @@ _BASE_CONFIG = _config.TrainConfig(
 @dataclasses.dataclass
 class SFTArgs:
     # Ordered list of task name strings exactly as they appear in the dataset.
-    # Run with --list_tasks to discover available task names before training.
-    tasks: list[str]
+    # Mutually exclusive with --num_tasks. Run with --list_tasks to browse.
+    tasks: list[str] = dataclasses.field(default_factory=list)
+
+    # If > 0, randomly sample this many tasks from the full dataset instead of
+    # specifying them explicitly with --tasks.
+    num_tasks: int = 0
+
+    # Seed used when randomly sampling tasks with --num_tasks.
+    task_seed: int = 42
 
     # Number of gradient steps to train on each task.
     steps_per_task: int = 5_000
@@ -378,8 +387,23 @@ def main(args: SFTArgs) -> None:
             print(f"  - {t}")
         return
 
+    if args.num_tasks > 0 and args.tasks:
+        raise ValueError("Specify either --tasks or --num_tasks, not both.")
+
+    if args.num_tasks > 0:
+        import random
+        all_tasks = list_available_tasks(repo_id)
+        rng_sample = random.Random(args.task_seed)
+        args = dataclasses.replace(
+            args, tasks=rng_sample.sample(all_tasks, args.num_tasks)
+        )
+        logging.info(
+            f"Sampled {args.num_tasks} tasks (task_seed={args.task_seed}):\n"
+            + "\n".join(f"  {i}: {t}" for i, t in enumerate(args.tasks))
+        )
+
     if not args.tasks:
-        raise ValueError("--tasks must specify at least one task name.")
+        raise ValueError("Specify at least one task via --tasks or use --num_tasks.")
 
     logging.info(
         f"Sequential fine-tuning on {len(args.tasks)} task(s):\n"

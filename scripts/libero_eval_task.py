@@ -11,6 +11,8 @@ The policy server must already be running:
 
 import collections
 import dataclasses
+import datetime
+import json
 import logging
 import math
 import pathlib
@@ -65,6 +67,8 @@ class Args:
 
     # Output
     video_out_path: str = "data/libero/videos"
+    # If set, write a JSON results file to this path after eval.
+    results_file: str = ""
 
     # Utility: print all available task descriptions and exit.
     list_tasks: bool = False
@@ -191,6 +195,7 @@ def eval_task(args: Args) -> None:
         )
 
     successes = 0
+    trial_outcomes = []
     for episode_idx in tqdm.tqdm(range(num_trials), desc="Trials"):
         env.reset()
         obs = env.set_init_state(initial_states[episode_idx])
@@ -252,6 +257,7 @@ def eval_task(args: Args) -> None:
                 logging.error(f"Episode {episode_idx} error: {e}")
                 break
 
+        trial_outcomes.append(bool(done))
         suffix = "success" if done else "failure"
         task_segment = task_description.replace(" ", "_")[:60]
         video_path = (
@@ -273,6 +279,21 @@ def eval_task(args: Args) -> None:
         f"Success rate: {successes}/{num_trials} "
         f"({100 * successes / num_trials:.1f}%)"
     )
+
+    if args.results_file:
+        results_path = pathlib.Path(args.results_file)
+        results_path.parent.mkdir(parents=True, exist_ok=True)
+        results = {
+            "task": task_description,
+            "suite": suite_name,
+            "num_trials": num_trials,
+            "successes": successes,
+            "success_rate": successes / num_trials,
+            "trials": trial_outcomes,
+            "timestamp": datetime.datetime.now().isoformat(),
+        }
+        results_path.write_text(json.dumps(results, indent=2))
+        logging.info(f"Results saved to {results_path}")
 
 
 if __name__ == "__main__":
