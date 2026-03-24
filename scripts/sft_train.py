@@ -13,7 +13,7 @@ Usage:
                 "open the top drawer and put the bowl inside" \
         --steps_per_task 5000 \
         --exp_name sft_run_0 \
-        --checkpoint_dir /local_data/lim2045/openpi/checkpoints/sft_checkpoints
+        --checkpoint_dir /scratch/lim2045/openpi/checkpoints/sft_checkpoints
 
 Checkpoint layout:
     {checkpoint_dir}/{exp_name}/
@@ -229,7 +229,7 @@ class SFTArgs:
     exp_name: str = "sft_run"
 
     # Root directory where per-task checkpoint subdirectories will be created.
-    checkpoint_dir: str = "/local_data/lim2045/openpi/checkpoints/sft_checkpoints"
+    checkpoint_dir: str = "/scratch/lim2045/openpi/checkpoints/sft_checkpoints"
 
     # Global batch size (must be divisible by the number of JAX devices).
     batch_size: int = 32

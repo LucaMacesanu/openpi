@@ -784,6 +784,44 @@ _CONFIGS = [
         num_train_steps=10_000,
         ema_decay=None,
     ),
+    # Pi0.5 full-vision fine-tuning:
+    #   - SigLIP vision encoder: full fine-tuning (all params trainable)
+    #   - Gemma-2B language model: LoRA fine-tuning
+    #   - Gemma-300M action expert: LoRA fine-tuning
+    # Same hyperparams as huihan_config; only paligemma_variant and freeze_filter differ.
+    TrainConfig(
+        name="huihan_full_0",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
+        # Freeze all LLM (Gemma-2B + action expert) non-LoRA weights.
+        # Vision (.*img.*) is not matched by .*llm.* and remains fully trainable.
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=2.5e-5,
+            decay_steps=10_000,
+            decay_lr=2.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(weight_decay=1e-10),
+        batch_size=8,
+        num_train_steps=10_000,
+        ema_decay=None,
+    ),
     # Pi0.5 MoE: action expert FFW replaced with sparse Mixture-of-Experts.
     # Each MoE expert is initialised from the pi05_base action expert weights.
     # Trainable params: router kernel + per-expert LoRA adapters.
@@ -925,7 +963,7 @@ _CONFIGS = [
         ),
         ema_decay=None,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        checkpoint_base_dir="/local_data/lim2045/vla/checkpoints",
+        checkpoint_base_dir="/scratch/lim2045/openpi/checkpoints",
         num_train_steps=10_000,
     ),
     #

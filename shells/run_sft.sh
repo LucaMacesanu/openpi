@@ -9,7 +9,7 @@
 #       --num_tasks 5 \
 #       --exp_name sft_run_0 \
 #       [--steps_per_task 5000] \
-#       [--checkpoint_dir /local_data/lim2045/openpi/checkpoints/sft_checkpoints] \
+#       [--checkpoint_dir /scratch/lim2045/openpi/checkpoints/sft_checkpoints] \
 #       [--task_seed 42] \
 #       [--cuda_devices 4,7] \
 #       [--batch_size 32] \
@@ -23,7 +23,7 @@ set -euo pipefail
 NUM_TASKS=0
 EXP_NAME="sft_run"
 STEPS_PER_TASK=5000
-CHECKPOINT_DIR="/local_data/lim2045/openpi/checkpoints/sft_checkpoints"
+CHECKPOINT_DIR="/scratch/lim2045/openpi/checkpoints/sft_checkpoints"
 TASK_SEED=42
 CUDA_DEVICES=""
 BATCH_SIZE=32
