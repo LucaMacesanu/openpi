@@ -822,6 +822,49 @@ _CONFIGS = [
         num_train_steps=10_000,
         ema_decay=None,
     ),
+    # huihan_full_0 + MoE action expert:
+    #   - SigLIP vision encoder: full fine-tuning
+    #   - Gemma-2B language model: LoRA fine-tuning
+    #   - Action expert FFW: sparse MoE with LoRA adapters per expert + router
+    # Same hyperparams as huihan_full_0.
+    TrainConfig(
+        name="moe_full_0",
+        model=pi0_moe_config.Pi0MoEConfig(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            moe_config=moe.MoEConfig(num_experts=4, top_k=1, router_z_loss_coeff=1e-3),
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        weight_loader=moe_weight_loader.MoEWeightLoader(
+            base_loader=weight_loaders.CheckpointWeightLoader(
+                "gs://openpi-assets/checkpoints/pi05_base/params"
+            ),
+            num_experts=4,
+        ),
+        # Freeze all LLM non-LoRA, non-router weights.
+        # Vision (.*img.*) is not matched and remains fully trainable.
+        # Gemma-2B LoRA, action expert LoRA, and MoE router are all trainable.
+        freeze_filter=nnx.All(
+            nnx_utils.PathRegex(".*llm.*"),
+            nnx.Not(nnx_utils.PathRegex(".*lora.*")),
+            nnx.Not(nnx_utils.PathRegex(".*router.*")),
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=2.5e-5,
+            decay_steps=10_000,
+            decay_lr=2.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(weight_decay=1e-10),
+        batch_size=8,
+        num_train_steps=10_000,
+        ema_decay=None,
+    ),
     # Pi0.5 MoE: action expert FFW replaced with sparse Mixture-of-Experts.
     # Each MoE expert is initialised from the pi05_base action expert weights.
     # Trainable params: router kernel + per-expert LoRA adapters.
