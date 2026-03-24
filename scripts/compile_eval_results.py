@@ -56,7 +56,14 @@ def compile(eval_dir: pathlib.Path) -> dict:
             "off_task": off_rate,
         })
 
-    return {"eval_dir": str(eval_dir), "results": rows}
+    on_vals  = [r["on_task"]  for r in rows if r["on_task"]  is not None]
+    off_vals = [r["off_task"] for r in rows if r["off_task"] is not None]
+    return {
+        "eval_dir": str(eval_dir),
+        "avg_on_task":  round(sum(on_vals)  / len(on_vals),  4) if on_vals  else None,
+        "avg_off_task": round(sum(off_vals) / len(off_vals), 4) if off_vals else None,
+        "results": rows,
+    }
 
 
 def print_summary(summary: dict):
@@ -67,6 +74,15 @@ def print_summary(summary: dict):
         on_str  = f"{r['on_task']:.0%}"  if r["on_task"]  is not None else "n/a"
         off_str = f"{r['off_task']:.0%}" if r["off_task"] is not None else "n/a"
         print(f"{r['task_num']:<4} {r['task_name'][:57]:<58} {on_str:>8} {off_str:>9}")
+
+    on_vals  = [r["on_task"]  for r in summary["results"] if r["on_task"]  is not None]
+    off_vals = [r["off_task"] for r in summary["results"] if r["off_task"] is not None]
+    avg_on  = sum(on_vals)  / len(on_vals)  if on_vals  else None
+    avg_off = sum(off_vals) / len(off_vals) if off_vals else None
+    on_str  = f"{avg_on:.0%}"  if avg_on  is not None else "n/a"
+    off_str = f"{avg_off:.0%}" if avg_off is not None else "n/a"
+    print("-" * 82)
+    print(f"{'avg':<4} {'':<58} {on_str:>8} {off_str:>9}")
     print()
 
 
