@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=eval_run
-#SBATCH --partition=h100_tandon
+#SBATCH --partition=a100_tandon
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=100G

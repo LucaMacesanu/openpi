@@ -22,7 +22,8 @@
 #       [--batch_size 32] \
 #       [--wandb_enabled true] \
 #       [--config_name pi05_libero_sft] \
-#       [--norm_stats_from pi0_libero_low_mem_finetune]
+#       [--norm_stats_from pi0_libero_low_mem_finetune] \
+#       [--checkpoint_interval 1000]
 # ---------------------------------------------------------------------------
 
 cd /scratch/lim2045/singularity
