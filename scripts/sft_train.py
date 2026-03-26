@@ -13,7 +13,7 @@ Usage:
                 "open the top drawer and put the bowl inside" \
         --steps_per_task 5000 \
         --exp_name sft_run_0 \
-        --checkpoint_dir /local_data/lim2045/openpi/checkpoints/sft_checkpoints
+        --checkpoint_dir /scratch/lim2045/openpi/checkpoints/sft_checkpoints
 
 Checkpoint layout:
     {checkpoint_dir}/{exp_name}/
@@ -229,7 +229,7 @@ class SFTArgs:
     exp_name: str = "sft_run"
 
     # Root directory where per-task checkpoint subdirectories will be created.
-    checkpoint_dir: str = "/local_data/lim2045/openpi/checkpoints/sft_checkpoints"
+    checkpoint_dir: str = "/scratch/lim2045/openpi/checkpoints/sft_checkpoints"
 
     # Global batch size (must be divisible by the number of JAX devices).
     batch_size: int = 32
@@ -245,6 +245,10 @@ class SFTArgs:
 
     # Random seed.
     seed: int = 42
+
+    # If set, save an intermediate checkpoint every N steps within each task.
+    # A final checkpoint is always saved at the end of each task regardless.
+    checkpoint_interval: int | None = None
 
     # If True, print all available task names and exit without training.
     list_tasks: bool = False
@@ -496,7 +500,7 @@ def main(args: SFTArgs) -> None:
 
         checkpoint_manager, _ = _checkpoints.initialize_checkpoint_dir(
             task_ckpt_dir,
-            keep_period=None,
+            keep_period=args.checkpoint_interval,
             overwrite=True,
             resume=False,
         )
@@ -534,6 +538,13 @@ def main(args: SFTArgs) -> None:
                     step=global_step_offset + task_step,
                 )
                 infos = []
+
+            if (
+                args.checkpoint_interval is not None
+                and task_step > 0
+                and task_step % args.checkpoint_interval == 0
+            ):
+                _checkpoints.save_state(checkpoint_manager, train_state, data_loader, task_step)
 
             batch = next(data_iter)
 

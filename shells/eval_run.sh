@@ -80,6 +80,18 @@ for TASK_DIR in "${TASK_DIRS[@]}"; do
     fi
     echo "Step dir  : $STEP_DIR"
 
+    # Check if this checkpoint was already evaluated.
+    METADATA_FILE="$TASK_DIR/metadata.json"
+    if [[ -f "$METADATA_FILE" ]]; then
+        NUM_TRAINED=$(python3 -c "import json; d=json.load(open('$METADATA_FILE')); print(d['num_tasks_trained'])")
+        EVAL_PHASE=$(python3 -c "print(f'after_task_{int(\"$NUM_TRAINED\") - 1:02d}')")
+        RESULTS_FILE="$RUN_DIR/evals/$EVAL_PHASE/results.json"
+        if [[ -f "$RESULTS_FILE" ]]; then
+            echo "[eval_run] Already evaluated ($RESULTS_FILE exists) — skipping."
+            continue
+        fi
+    fi
+
     # Kill previous server if still running.
     if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
         echo "[eval_run] Stopping previous server (PID=$SERVER_PID)"
@@ -89,13 +101,22 @@ for TASK_DIR in "${TASK_DIRS[@]}"; do
         sleep 3
     fi
 
+    # Read config name from metadata.json if present.
+    if [[ -f "$METADATA_FILE" ]]; then
+        POLICY_CONFIG=$(python3 -c "import json,sys; d=json.load(open('$METADATA_FILE')); print(d['config']['name'])" 2>/dev/null || echo "pi05_libero_sft")
+    else
+        POLICY_CONFIG="pi05_libero_sft"
+    fi
+    echo "[eval_run] Policy config: $POLICY_CONFIG"
+
     # Start the policy server for this checkpoint.
     SERVER_PID=$(bash "$SCRIPT_DIR/serve_policy.sh" \
         --checkpoint_dir "$STEP_DIR" \
         --cuda_devices   "$CUDA_DEVICES" \
         --host           "$HOST" \
         --port           "$PORT" \
-        --timeout        "$SERVER_TIMEOUT")
+        --timeout        "$SERVER_TIMEOUT" \
+        --config         "$POLICY_CONFIG")
 
     echo "[eval_run] Server up (PID=$SERVER_PID)"
 
@@ -110,3 +131,7 @@ done
 
 echo ""
 echo "All checkpoints evaluated. Results in: $RUN_DIR/evals/"
+
+# Generate summary.
+echo "Compiling eval summary..."
+uv run scripts/compile_eval_results.py "$RUN_DIR/evals"

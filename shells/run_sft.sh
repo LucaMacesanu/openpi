@@ -24,13 +24,14 @@ set -euo pipefail
 NUM_TASKS=0
 EXP_NAME="sft_run"
 STEPS_PER_TASK=5000
-CHECKPOINT_DIR="/local_data/lim2045/openpi/checkpoints/sft_checkpoints"
+CHECKPOINT_DIR="/scratch/lim2045/openpi/checkpoints/sft_checkpoints"
 TASK_SEED=42
 CUDA_DEVICES=""
 BATCH_SIZE=32
 WANDB_ENABLED=true
 CONFIG_NAME="pi05_libero_sft"
 NORM_STATS_FROM="pi0_libero_low_mem_finetune"
+CHECKPOINT_INTERVAL=""
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.8
 
 # ---------------------------------------------------------------------------
@@ -46,8 +47,9 @@ while [[ $# -gt 0 ]]; do
         --cuda_devices)    CUDA_DEVICES="$2";    shift 2 ;;
         --batch_size)      BATCH_SIZE="$2";      shift 2 ;;
         --wandb_enabled)   WANDB_ENABLED="$2";   shift 2 ;;
-        --config_name)     CONFIG_NAME="$2";     shift 2 ;;
-        --norm_stats_from) NORM_STATS_FROM="$2"; shift 2 ;;
+        --config_name)          CONFIG_NAME="$2";          shift 2 ;;
+        --norm_stats_from)      NORM_STATS_FROM="$2";      shift 2 ;;
+        --checkpoint_interval)  CHECKPOINT_INTERVAL="$2";  shift 2 ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
 done
@@ -63,7 +65,8 @@ if [[ "$NUM_TASKS" -eq 0 ]]; then
     echo "  --task_seed       N        Seed for task sampling (default: 42)"
     echo "  --cuda_devices    0,1,...  CUDA_VISIBLE_DEVICES value (default: all)"
     echo "  --batch_size      N        Global batch size (default: 32)"
-    echo "  --wandb_enabled   true|false (default: true)"
+    echo "  --wandb_enabled        true|false (default: true)"
+    echo "  --checkpoint_interval  N        Save intermediate checkpoint every N steps (default: off)"
     exit 1
 fi
 
@@ -88,6 +91,10 @@ else
     CMD+=(--no-wandb_enabled)
 fi
 
+if [[ -n "$CHECKPOINT_INTERVAL" ]]; then
+    CMD+=(--checkpoint_interval "$CHECKPOINT_INTERVAL")
+fi
+
 echo "============================================================"
 echo "SFT Run Scheduler"
 echo "  Experiment  : $EXP_NAME"
@@ -95,6 +102,9 @@ echo "  Tasks       : $NUM_TASKS (task_seed=$TASK_SEED)"
 echo "  Config      : $CONFIG_NAME"
 echo "  Steps/task  : $STEPS_PER_TASK"
 echo "  Checkpoint  : $CHECKPOINT_DIR/$EXP_NAME"
+if [[ -n "$CHECKPOINT_INTERVAL" ]]; then
+    echo "  Ckpt interval: every $CHECKPOINT_INTERVAL steps"
+fi
 if [[ -n "$CUDA_DEVICES" ]]; then
     echo "  CUDA devices: $CUDA_DEVICES"
 fi
