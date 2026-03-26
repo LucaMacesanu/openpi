@@ -20,6 +20,7 @@ HOST="0.0.0.0"
 PORT=8000
 POLL_INTERVAL=5   # seconds between readiness checks
 TIMEOUT=300       # seconds to wait before giving up
+CONFIG="pi05_libero_sft"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -28,6 +29,7 @@ while [[ $# -gt 0 ]]; do
         --host)           HOST="$2";           shift 2 ;;
         --port)           PORT="$2";           shift 2 ;;
         --timeout)        TIMEOUT="$2";        shift 2 ;;
+        --config)         CONFIG="$2";         shift 2 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
@@ -51,7 +53,7 @@ echo "[serve_policy] Log        : $LOG_FILE"        >&2
 CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" \
     uv run "$OPENPI_ROOT/scripts/serve_policy.py" \
         policy:checkpoint \
-        --policy.config=pi05_libero_sft \
+        --policy.config="$CONFIG" \
         --policy.dir="$CHECKPOINT_DIR" \
     > "$LOG_FILE" 2>&1 &
 

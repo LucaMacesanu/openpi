@@ -903,6 +903,81 @@ _CONFIGS = [
         num_train_steps=5_000,
         ema_decay=None,
     ),
+    # huihan_fast: full vision FT + Gemma-2B LoRA + action expert LoRA, single expert (dense baseline).
+    #   Same hyperparams as moe_full_1 but num_experts=1 to test speed/convergence without MoE overhead.
+    TrainConfig(
+        name="huihan_fast",
+        model=pi0_moe_config.Pi0MoEConfig(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+            moe_config=moe.MoEConfig(num_experts=1, top_k=1, router_z_loss_coeff=1e-3),
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        weight_loader=moe_weight_loader.MoEWeightLoader(
+            base_loader=weight_loaders.CheckpointWeightLoader(
+                "gs://openpi-assets/checkpoints/pi05_base/params"
+            ),
+            num_experts=1,
+        ),
+        freeze_filter=nnx.All(
+            nnx_utils.PathRegex(".*llm.*"),
+            nnx.Not(nnx_utils.PathRegex(".*lora.*")),
+            nnx.Not(nnx_utils.PathRegex(".*router.*")),
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=5e-5,
+            decay_steps=5_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(weight_decay=1e-10),
+        batch_size=32,
+        num_train_steps=5_000,
+        ema_decay=None,
+    ),
+    # huihan_aefft_only: action expert full FT only, vision + LM frozen, single expert (dense).
+    TrainConfig(
+        name="huihan_aefft_only",
+        model=pi0_moe_config.Pi0MoEConfig(
+            pi05=True,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
+            moe_config=moe.MoEConfig(num_experts=1, top_k=1, router_z_loss_coeff=1e-3),
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        weight_loader=moe_weight_loader.MoEWeightLoader(
+            base_loader=weight_loaders.CheckpointWeightLoader(
+                "gs://openpi-assets/checkpoints/pi05_base/params"
+            ),
+            num_experts=1,
+        ),
+        freeze_filter=nnx.Any(
+            nnx_utils.PathRegex(".*img.*"),
+            nnx.All(
+                nnx_utils.PathRegex(".*llm.*"),
+                nnx.Not(nnx_utils.PathRegex(".*llm.*_1.*")),
+            ),
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=5e-5,
+            decay_steps=5_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(weight_decay=1e-10),
+        batch_size=32,
+        num_train_steps=5_000,
+        ema_decay=None,
+    ),
     # ae_only_0: MoE action expert full fine-tuning only.
     #   Vision and language model fully frozen; all action expert weights + router trainable.
     #   Higher LR (5e-5), larger batch (32), 5000 steps/task, 4 experts, top-1, 10 tasks, seed 42.

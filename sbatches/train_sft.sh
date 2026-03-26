@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=sft_train
-#SBATCH --partition=h100_tandon,h200_tandon
+#SBATCH --partition=h200_tandon,h100_tandon
 #SBATCH --constraint="h100|h200"
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=100G
-#SBATCH --time=13:00:00
+#SBATCH --mem=200G
+#SBATCH --time=24:00:00
 #SBATCH --output=logs/%j_train_sft.out
 #SBATCH --account=torch_pr_50_tandon_advanced
 #SBATCH --mail-type=BEGIN,END,FAIL
@@ -14,7 +14,7 @@
 # ---------------------------------------------------------------------------
 # Usage:
 #   sbatch sbatches/train_sft.sh \
-#       --num_tasks 5 \
+#       --num_tasks 10 \
 #       --exp_name sft_run_0 \
 #       [--steps_per_task 5000] \
 #       [--checkpoint_dir /scratch/lim2045/openpi/checkpoints/sft_checkpoints] \
