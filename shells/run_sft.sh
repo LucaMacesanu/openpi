@@ -5,16 +5,17 @@
 # trains on them one at a time, saving a checkpoint after each task.
 #
 # Usage:
-#   bash shells/run_sft.sh \
-#       --num_tasks 5 \
-#       --exp_name sft_run_0 \
-#       [--steps_per_task 5000] \
-#       [--checkpoint_dir /local_data/lim2045/openpi/checkpoints/sft_checkpoints] \
-#       [--task_seed 42] \
-#       [--cuda_devices 4,7] \
-#       [--batch_size 32] \
-#       [--wandb_enabled true]
-
+'''
+   bash shells/run_sft.sh \
+       --num_tasks 5 \
+       --exp_name sft_run_0 \
+       [--steps_per_task 5000] \
+       [--checkpoint_dir /local_data/lim2045/openpi/checkpoints/sft_checkpoints] \
+       [--task_seed 42] \
+       [--cuda_devices 4,7] \
+       [--batch_size 32] \
+       [--wandb_enabled true]
+'''
 set -euo pipefail
 
 # ---------------------------------------------------------------------------

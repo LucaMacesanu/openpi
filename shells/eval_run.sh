@@ -8,10 +8,12 @@
 #   4. Kills the server before moving on.
 #
 # Usage:
-#   bash shells/eval_run.sh \
-#       --run_dir   checkpoints/sft_checkpoints/sft_run_0 \
-#       --num_trials 10 \
-#       --cuda_devices 4,6,7
+'''
+  bash shells/eval_run.sh \
+      --run_dir   checkpoints/sft_checkpoints/sft_run_0 \
+      --num_trials 10 \
+      --cuda_devices 4,6,7
+'''
 
 set -euo pipefail
 

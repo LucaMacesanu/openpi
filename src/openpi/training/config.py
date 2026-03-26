@@ -809,6 +809,38 @@ _CONFIGS = [
         freeze_filter=pi0_moe_config.Pi0MoEConfig().get_freeze_filter(),
         ema_decay=None,
     ),
+    # MoE variant with huihan_config hyperparameters for direct comparison.
+    TrainConfig(
+        name="pi05_libero_moe_huihan",
+        model=pi0_moe_config.Pi0MoEConfig(
+            pi05=True,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m_lora",
+            moe_config=moe.MoEConfig(num_experts=4, top_k=2, router_z_loss_coeff=1e-3),
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        weight_loader=moe_weight_loader.MoEWeightLoader(
+            base_loader=weight_loaders.CheckpointWeightLoader(
+                "gs://openpi-assets/checkpoints/pi05_base/params"
+            ),
+            num_experts=4,
+        ),
+        freeze_filter=pi0_moe_config.Pi0MoEConfig().get_freeze_filter(),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=2.5e-5,
+            decay_steps=10_000,
+            decay_lr=2.5e-6,
+        ),
+        optimizer=_optimizer.AdamW(weight_decay=1e-10),
+        batch_size=8,
+        num_train_steps=10_000,
+        ema_decay=None,
+    ),
     TrainConfig(
         name="pi0_libero_low_mem_finetune",
         # Here is an example of loading a pi0 model for LoRA fine-tuning.
