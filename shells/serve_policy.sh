@@ -52,6 +52,7 @@ echo "[serve_policy] Log        : $LOG_FILE"        >&2
 
 CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" \
     uv run "$OPENPI_ROOT/scripts/serve_policy.py" \
+        --port="$PORT" \
         policy:checkpoint \
         --policy.config="$CONFIG" \
         --policy.dir="$CHECKPOINT_DIR" \
@@ -60,7 +61,14 @@ CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" \
 SERVER_PID=$!
 echo "[serve_policy] Started server (PID=$SERVER_PID)" >&2
 
-# Poll until the port is open or we time out.
+# Fail fast if something else is already bound to this port (e.g. another SLURM job).
+if nc -z "$HOST" "$PORT" 2>/dev/null; then
+    echo "[serve_policy] ERROR: port $PORT is already in use before we started — another job may be on this node." >&2
+    kill "$SERVER_PID" 2>/dev/null || true
+    exit 1
+fi
+
+# Poll until OUR process is listening on the port.
 ELAPSED=0
 until nc -z "$HOST" "$PORT" 2>/dev/null; do
     if ! kill -0 "$SERVER_PID" 2>/dev/null; then

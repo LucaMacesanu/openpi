@@ -1,23 +1,29 @@
 #!/bin/bash
-#SBATCH --job-name=eval_run
+#SBATCH --job-name=sft_train
 #SBATCH --partition=a100_tandon
-#SBATCH --gres=gpu:1
+#SBATCH --constraint="a100"
+#SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=100G
-#SBATCH --time=6:00:00
-#SBATCH --output=logs/%j_eval_run.out
+#SBATCH --mem=200G
+#SBATCH --time=24:00:00
+#SBATCH --output=logs/%j_train_sft.out
 #SBATCH --account=torch_pr_50_tandon_advanced
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=lim2045@nyu.edu
 
 # ---------------------------------------------------------------------------
 # Usage:
-#   sbatch sbatches/eval_run.sh \
-#       --run_dir checkpoints/sft_checkpoints/huihan_run_0 \
-#       [--num_trials 10] \
-#       [--cuda_devices 0] \
-#       [--host 0.0.0.0] \
-#       [--port 8000]
+#   sbatch sbatches/train_sft.sh \
+#       --num_tasks 10 \
+#       --exp_name sft_run_0 \
+#       [--steps_per_task 5000] \
+#       [--checkpoint_dir /scratch/lim2045/openpi/checkpoints/sft_checkpoints] \
+#       [--task_seed 42] \
+#       [--batch_size 32] \
+#       [--wandb_enabled true] \
+#       [--config_name pi05_libero_sft] \
+#       [--norm_stats_from pi0_libero_low_mem_finetune] \
+#       [--checkpoint_interval 1000]
 # ---------------------------------------------------------------------------
 
 cd /scratch/lim2045/singularity
@@ -28,8 +34,4 @@ source .venv/bin/activate
 
 export WANDB_API_KEY=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
 
-# Use a unique port per SLURM job to avoid conflicts when two jobs land on the same node.
-JOB_PORT=$((8000 + (SLURM_JOB_ID % 50000) % 10000))
-echo "[sbatch] Using port $JOB_PORT (SLURM_JOB_ID=$SLURM_JOB_ID)"
-
-bash shells/eval_run.sh --port "$JOB_PORT" --server_timeout 900 "$@"
+bash shells/run_sft.sh "$@"
