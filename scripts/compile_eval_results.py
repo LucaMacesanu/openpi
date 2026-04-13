@@ -15,6 +15,7 @@ Usage:
 import argparse
 import json
 import pathlib
+import re
 import sys
 
 
@@ -31,8 +32,29 @@ def compile(eval_dir: pathlib.Path) -> dict:
         print(f"No after_task_* directories found in {eval_dir}", file=sys.stderr)
         sys.exit(1)
 
+    # Group dirs by task key (e.g. "after_task_00"), keep only the last checkpoint.
+    # For step-specific dirs, "last" = highest step number; bare dirs are used only
+    # when no step-specific sibling exists.
+    task_groups: dict[str, pathlib.Path] = {}
+    for phase_dir in phase_dirs:
+        m = re.match(r'(after_task_\w+?)(?:_step_(\d+))?$', phase_dir.name)
+        if not m:
+            continue
+        task_key = m.group(1)
+        step = int(m.group(2)) if m.group(2) is not None else -1
+
+        existing = task_groups.get(task_key)
+        if existing is None:
+            task_groups[task_key] = (step, phase_dir)
+        else:
+            existing_step, _ = existing
+            if step > existing_step:
+                task_groups[task_key] = (step, phase_dir)
+
+    selected_dirs = [phase_dir for _, phase_dir in sorted(task_groups.values(), key=lambda x: x[1].name)]
+
     rows = []
-    for i, phase_dir in enumerate(phase_dirs):
+    for phase_dir in selected_dirs:
         data = load_phase(phase_dir)
         if data is None:
             print(f"  Skipping {phase_dir.name}: no results.json", file=sys.stderr)
@@ -50,8 +72,9 @@ def compile(eval_dir: pathlib.Path) -> dict:
         off_rate = round(sum(prior_rates) / len(prior_rates), 4) if prior_rates else None
 
         rows.append({
-            "task_num": i,
+            "task_num": len(rows),  # contiguous numbering regardless of skips
             "task_name": current_task,
+            "phase": phase_dir.name,
             "on_task": on_rate,
             "off_task": off_rate,
         })

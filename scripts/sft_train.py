@@ -250,6 +250,10 @@ class SFTArgs:
     # A final checkpoint is always saved at the end of each task regardless.
     checkpoint_interval: int | None = None
 
+    # If True, resume from the last completed or partial task checkpoint rather
+    # than starting fresh from the base pi0.5 weights.
+    resume: bool = False
+
     # If True, print all available task names and exit without training.
     list_tasks: bool = False
 
@@ -460,18 +464,69 @@ def main(args: SFTArgs) -> None:
         wandb.init(mode="disabled")
 
     # ------------------------------------------------------------------
+    # Resume detection: scan task dirs to find how far we've gotten.
+    # ------------------------------------------------------------------
+    start_task_idx = 0
+    tasks_trained_so_far: list[str] = []
+    global_step_offset = 0
+    partial_task_resume_step: int | None = None  # local step within partial task
+
+    if args.resume:
+        for i, tname in enumerate(args.tasks):
+            tslug = tname.replace(" ", "_")[:50]
+            tdir = run_ckpt_root / f"task_{i:02d}_{tslug}"
+            if (tdir / "metadata.json").exists():
+                tasks_trained_so_far.append(tname)
+                global_step_offset += args.steps_per_task
+                start_task_idx = i + 1
+            elif tdir.exists():
+                tmp_mgr, has_ckpt = _checkpoints.initialize_checkpoint_dir(
+                    tdir, keep_period=None, overwrite=False, resume=True
+                )
+                if has_ckpt:
+                    partial_task_resume_step = tmp_mgr.latest_step()
+                    logging.info(
+                        f"Partial task at task_{i:02d}: resuming from local step {partial_task_resume_step}"
+                    )
+                start_task_idx = i
+                break
+            else:
+                break
+        logging.info(
+            f"Resume: {start_task_idx} completed task(s), "
+            f"partial_step={partial_task_resume_step}"
+        )
+
+    # ------------------------------------------------------------------
     # Initialize train state once from the base pi0.5 checkpoint.
     # Model weights carry over across tasks; the step counter and optimizer
     # state continue uninterrupted so the LR schedule runs smoothly.
+    # When resuming, skip loading base weights and restore from checkpoint.
     # ------------------------------------------------------------------
+    need_restore = args.resume and (start_task_idx > 0 or partial_task_resume_step is not None)
     train_state, train_state_sharding = init_train_state(
-        config, init_rng, mesh, resume=False
+        config, init_rng, mesh, resume=need_restore
     )
-    jax.block_until_ready(train_state)
-    logging.info(
-        f"Initialized train state:\n"
-        f"{training_utils.array_tree_to_info(train_state.params)}"
-    )
+    if not need_restore:
+        jax.block_until_ready(train_state)
+        logging.info(
+            f"Initialized train state:\n"
+            f"{training_utils.array_tree_to_info(train_state.params)}"
+        )
+
+    if need_restore:
+        restore_idx = start_task_idx if partial_task_resume_step is not None else start_task_idx - 1
+        restore_slug = args.tasks[restore_idx].replace(" ", "_")[:50]
+        restore_dir = run_ckpt_root / f"task_{restore_idx:02d}_{restore_slug}"
+        restore_mgr, _ = _checkpoints.initialize_checkpoint_dir(
+            restore_dir, keep_period=None, overwrite=False, resume=True
+        )
+        train_state = _checkpoints.restore_state(restore_mgr, train_state, None)
+        jax.block_until_ready(train_state)
+        logging.info(
+            f"Restored train state from {restore_dir} "
+            f"(train_state.step={int(train_state.step)})"
+        )
 
     # JIT-compile the train step once; reused across all tasks.
     ptrain_step = jax.jit(
@@ -484,10 +539,11 @@ def main(args: SFTArgs) -> None:
     # ------------------------------------------------------------------
     # Sequential task loop
     # ------------------------------------------------------------------
-    tasks_trained_so_far: list[str] = []
-    global_step_offset = 0  # for W&B x-axis continuity
-
     for task_idx, task_name in enumerate(args.tasks):
+        # Skip already-completed tasks when resuming.
+        if task_idx < start_task_idx:
+            continue
+
         logging.info(
             f"\n{'=' * 64}\n"
             f"Task {task_idx + 1}/{len(args.tasks)}: {task_name}\n"
@@ -498,28 +554,45 @@ def main(args: SFTArgs) -> None:
         safe_slug = task_name.replace(" ", "_")[:50]
         task_ckpt_dir = run_ckpt_root / f"task_{task_idx:02d}_{safe_slug}"
 
-        checkpoint_manager, _ = _checkpoints.initialize_checkpoint_dir(
-            task_ckpt_dir,
-            keep_period=args.checkpoint_interval,
-            overwrite=True,
-            resume=False,
-        )
+        is_partial = task_idx == start_task_idx and partial_task_resume_step is not None
+
+        if is_partial:
+            # Continue from the existing checkpoint; do not wipe the directory.
+            checkpoint_manager, _ = _checkpoints.initialize_checkpoint_dir(
+                task_ckpt_dir,
+                keep_period=None,
+                overwrite=False,
+                resume=True,
+            )
+            step_range = range(partial_task_resume_step + 1, args.steps_per_task)
+            logging.info(
+                f"Resuming partial task from local step {partial_task_resume_step}; "
+                f"{len(step_range)} steps remaining."
+            )
+        else:
+            checkpoint_manager, _ = _checkpoints.initialize_checkpoint_dir(
+                task_ckpt_dir,
+                keep_period=args.checkpoint_interval,
+                overwrite=True,
+                resume=False,
+            )
+            step_range = range(args.steps_per_task)
 
         # Build data loader for this task (filters full dataset by task_index at frame level).
         data_loader = create_task_data_loader(config, task_name, data_sharding)
         data_iter = iter(data_loader)
         batch = next(data_iter)
 
-        # Train for steps_per_task steps.
+        # Train for the remaining steps of this task.
         pbar = tqdm.tqdm(
-            range(args.steps_per_task),
-            total=args.steps_per_task,
+            step_range,
+            total=len(step_range),
             dynamic_ncols=True,
             desc=f"[{task_idx:02d}] {task_name[:45]}",
         )
 
         infos = []
-        task_step = 0
+        task_step = partial_task_resume_step if is_partial else 0
         for task_step in pbar:
             with sharding.set_mesh(mesh):
                 train_state, info = ptrain_step(train_rng, train_state, batch)

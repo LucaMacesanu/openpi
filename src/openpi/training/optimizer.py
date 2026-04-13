@@ -53,6 +53,27 @@ class RsqrtDecaySchedule(LRScheduleConfig):
         )
 
 
+@dataclasses.dataclass(frozen=True)
+class ConstantSchedule(LRScheduleConfig):
+    """Constant LR schedule with linear warmup. No decay after peak."""
+
+    warmup_steps: int = 1_000
+    lr: float = 2.5e-5
+
+    def create(self) -> optax.Schedule:
+        return optax.join_schedules(
+            [
+                optax.linear_schedule(
+                    init_value=self.lr / (self.warmup_steps + 1),
+                    end_value=self.lr,
+                    transition_steps=self.warmup_steps,
+                ),
+                optax.constant_schedule(self.lr),
+            ],
+            [self.warmup_steps],
+        )
+
+
 @runtime_checkable
 class OptimizerConfig(Protocol):
     def create(

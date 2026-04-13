@@ -725,6 +725,52 @@ _CONFIGS = [
         ),
         ema_decay=None,
     ),
+    # Full fine-tuning: vision, language (PaliGemma), and action expert all trained with full weights.
+    TrainConfig(
+        name="pi05_libero_fp",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
+        # No freeze filter: all parameters (vision, language, action expert) are trainable.
+        freeze_filter=None,
+        lr_schedule=_optimizer.CosineDecaySchedule(peak_lr=5e-5, decay_lr=5e-6),
+        ema_decay=None,
+    ),
+    # Mixed fine-tuning: vision full FT, language LoRA, action expert full FT.
+    TrainConfig(
+        name="pi05_libero_flf",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b_lora",   # LoRA on language backbone
+            action_expert_variant="gemma_300m",  # full weights on action expert
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
+        # Freeze language base weights (non-LoRA); vision encoder and action expert are fully trainable.
+        freeze_filter=nnx.All(
+            nnx_utils.PathRegex(".*llm.*"),
+            nnx.Not(nnx_utils.PathRegex(".*llm.*_1.*")),
+            nnx.Not(nnx_utils.PathRegex(".*lora.*")),
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(peak_lr=5e-5, decay_lr=5e-6),
+        ema_decay=None,
+    ),
     # Hyperparam variant: lower LR, higher weight decay, shorter warmup (suited for short per-task runs).
     TrainConfig(
         name="pi05_libero_sft_v1",
@@ -752,6 +798,30 @@ _CONFIGS = [
             decay_lr=5e-6,
         ),
         optimizer=_optimizer.AdamW(weight_decay=0.075),
+        ema_decay=None,
+    ),
+    # pi05 full fine-tuning with constant LR (no decay after warmup). Intended for
+    # sequential fine-tuning on LIBERO-Spatial tasks via sft_train.py.
+    TrainConfig(
+        name="pi05_libero_sft_nodecay",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
+        freeze_filter=None,
+        lr_schedule=_optimizer.ConstantSchedule(
+            warmup_steps=1_000,
+            lr=2.5e-5,
+        ),
         ema_decay=None,
     ),
     TrainConfig(

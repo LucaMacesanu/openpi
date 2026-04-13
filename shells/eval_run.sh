@@ -23,6 +23,7 @@ HOST="0.0.0.0"
 PORT=8000
 CUDA_DEVICES="0"
 SERVER_TIMEOUT=300  # seconds to wait for server to come up
+FORCE=0             # if 1, skip the already-done check and re-evaluate everything
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -32,6 +33,7 @@ while [[ $# -gt 0 ]]; do
         --port)           PORT="$2";           shift 2 ;;
         --cuda_devices)   CUDA_DEVICES="$2";   shift 2 ;;
         --server_timeout) SERVER_TIMEOUT="$2"; shift 2 ;;
+        --force)          FORCE=1;             shift 1 ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
 done
@@ -96,8 +98,8 @@ for TASK_DIR in "${TASK_DIRS[@]}"; do
     for STEP_DIR in "${STEP_DIRS[@]}"; do
         STEP=$(basename "$STEP_DIR")
 
-        # Determine eval results path for skip check.
-        if [[ -n "$BASE_EVAL_PHASE" ]]; then
+        # Determine eval results path for skip check (unless --force).
+        if [[ $FORCE -eq 0 && -n "$BASE_EVAL_PHASE" ]]; then
             EVAL_PHASE="${BASE_EVAL_PHASE}_step_${STEP}"
             RESULTS_FILE="$RUN_DIR/evals/$EVAL_PHASE/results.json"
             if [[ -f "$RESULTS_FILE" ]]; then

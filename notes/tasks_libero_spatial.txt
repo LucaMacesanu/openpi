@@ -1,0 +1,13 @@
+# Libero Spatial tasks in canonical order (from notes/canonical_task_order.txt).
+# One task per line. Lines starting with # are ignored by run_sft_ordered.sh.
+# Task names are lowercase without trailing periods to match the LeRobot dataset.
+pick up the black bowl between the plate and the ramekin and place it on the plate
+pick up the black bowl next to the ramekin and place it on the plate
+pick up the black bowl from table center and place it on the plate
+pick up the black bowl on the cookie box and place it on the plate
+pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate
+pick up the black bowl on the ramekin and place it on the plate
+pick up the black bowl next to the cookie box and place it on the plate
+pick up the black bowl on the stove and place it on the plate
+pick up the black bowl next to the plate and place it on the plate
+pick up the black bowl on the wooden cabinet and place it on the plate
