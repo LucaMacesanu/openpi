@@ -93,6 +93,8 @@ class DataConfig:
 
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
+    # Optional subset of LeRobot task names to keep when loading the dataset.
+    task_names: Sequence[str] = ()
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
@@ -560,6 +562,20 @@ class TrainConfig:
             raise ValueError("Cannot resume and overwrite at the same time.")
 
 
+_LIBERO_SPATIAL_TASKS = (
+    "pick up the black bowl between the plate and the ramekin and place it on the plate",
+    "pick up the black bowl next to the ramekin and place it on the plate",
+    "pick up the black bowl from table center and place it on the plate",
+    "pick up the black bowl on the cookie box and place it on the plate",
+    "pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate",
+    "pick up the black bowl on the ramekin and place it on the plate",
+    "pick up the black bowl next to the cookie box and place it on the plate",
+    "pick up the black bowl on the stove and place it on the plate",
+    "pick up the black bowl next to the plate and place it on the plate",
+    "pick up the black bowl on the wooden cabinet and place it on the plate",
+)
+
+
 # Use `get_config` if you need to get a config by name in your code.
 _CONFIGS = [
     #
@@ -677,6 +693,21 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         # Below you can define other hyperparameters like the learning rate, number of training steps, etc.
         # Check the base TrainConfig class for a full list of available hyperparameters.
+        num_train_steps=30_000,
+    ),
+    TrainConfig(
+        name="pi0_libero_spatial_only",
+        model=pi0_config.Pi0Config(),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            assets=AssetsConfig(asset_id="libero_spatial"),
+            base_config=DataConfig(
+                prompt_from_task=True,
+                task_names=_LIBERO_SPATIAL_TASKS,
+            ),
+            extra_delta_transform=True,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=30_000,
     ),
     # @Luca THIS IS WHJAT YOU WANT TO USE
@@ -1217,6 +1248,31 @@ _CONFIGS = [
         data=LeRobotLiberoDataConfig(
             repo_id="physical-intelligence/libero",
             base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        batch_size=256,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path="/path/to/your/pytorch_weight_path",
+        num_train_steps=30_000,
+    ),
+    TrainConfig(
+        name="pi05_libero_spatial_only",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            assets=AssetsConfig(asset_id="libero_spatial"),
+            base_config=DataConfig(
+                prompt_from_task=True,
+                task_names=_LIBERO_SPATIAL_TASKS,
+            ),
             extra_delta_transform=False,
         ),
         batch_size=256,

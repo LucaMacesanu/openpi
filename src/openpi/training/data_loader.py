@@ -145,6 +145,26 @@ def create_torch_dataset(
         },
     )
 
+    if data_config.task_names:
+        missing_tasks = [task_name for task_name in data_config.task_names if task_name not in dataset_meta.task_to_task_index]
+        if missing_tasks:
+            raise ValueError(f"Task(s) not found in {repo_id}: {missing_tasks}")
+
+        allowed_task_indices = {
+            int(dataset_meta.task_to_task_index[task_name]) for task_name in data_config.task_names
+        }
+        task_frame_indices = [
+            i for i, task_idx in enumerate(dataset.hf_dataset["task_index"]) if int(task_idx) in allowed_task_indices
+        ]
+        logging.info(
+            "Filtering %s to %d task(s), keeping %d/%d frame(s).",
+            repo_id,
+            len(data_config.task_names),
+            len(task_frame_indices),
+            len(dataset),
+        )
+        dataset = torch.utils.data.Subset(dataset, task_frame_indices)
+
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
 

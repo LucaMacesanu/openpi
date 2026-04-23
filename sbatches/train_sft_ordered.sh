@@ -4,12 +4,12 @@
 #SBATCH --constraint="h100|h200"
 #SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=200G
+#SBATCH --mem=128G
 #SBATCH --time=24:00:00
 #SBATCH --output=logs/%j_train_sft_ordered.out
 #SBATCH --account=torch_pr_50_tandon_advanced
 #SBATCH --mail-type=BEGIN,END,FAIL
-#SBATCH --mail-user=lim2045@nyu.edu
+#SBATCH --mail-user=tz2668@nyu.edu
 
 # ---------------------------------------------------------------------------
 # Usage:
