@@ -1,4 +1,4 @@
-"""Pi0MoEConfig — configuration for the Pi0MoE model."""
+"""Pi0MoEConfig — configuration for the pi0-specific MoE model."""
 
 from __future__ import annotations
 
@@ -19,19 +19,20 @@ if TYPE_CHECKING:
 
 @dataclasses.dataclass(frozen=True)
 class Pi0MoEConfig(Pi0Config):
-    """Pi0.5 config with a sparse MoE action expert.
+    """pi0 config with a sparse MoE action expert.
 
-    Extends Pi0Config so that ModelTransformFactory's isinstance check passes.
-    All Pi0Config fields are inherited; moe_config is the only addition.
+    This is intentionally pi0-specific: preprocessing and suffix construction
+    remain on the dense pi0 path, and the MoE router sees the full suffix
+    hidden representation (state + timestep-mixed action hidden states).
     """
 
+    pi05: bool = False
     moe_config: moe.MoEConfig = dataclasses.field(default_factory=moe.MoEConfig)
 
     def __post_init__(self):
-        # Ensure pi05-style defaults (same as Pi0Config.__post_init__).
+        object.__setattr__(self, "pi05", False)
+        object.__setattr__(self, "discrete_state_input", False)
         super().__post_init__()
-        # Override pi05=False default from Pi0Config when not explicitly set.
-        # (We always want pi05=True for MoE; the default value is set below.)
 
     @override
     def create(self, rng: at.KeyArrayLike) -> Pi0MoE:
@@ -41,19 +42,17 @@ class Pi0MoEConfig(Pi0Config):
 
     @override
     def get_freeze_filter(self) -> nnx.filterlib.Filter:
-        """Freeze PaliGemma backbone + action expert base weights.
+        """Freeze LLM base weights while leaving MoE router/adapters trainable.
 
-        Trainable:
-          - Action expert LoRA adapters  (.*llm.*_1.*lora.*)
-          - Router kernel                (.*llm.*_1.*router.*)
+        Note that this mirrors the existing MoE freeze policy: parameters
+        outside `.*llm.*` such as vision and pi0 suffix projection layers
+        remain trainable.
         """
         return nnx.Any(
-            # Freeze all PaliGemma LLM params (expert 0).
             nnx.All(
                 nnx_utils.PathRegex(".*llm.*"),
                 nnx.Not(nnx_utils.PathRegex(".*llm.*_1.*")),
             ),
-            # Freeze action expert base weights, but not LoRA or router.
             nnx.All(
                 nnx_utils.PathRegex(".*llm.*_1.*"),
                 nnx.Not(nnx_utils.PathRegex(".*lora.*")),

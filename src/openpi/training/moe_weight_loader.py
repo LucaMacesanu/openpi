@@ -1,4 +1,4 @@
-"""MoEWeightLoader — loads pi05_base weights and fans out action expert FFW to MoE experts.
+"""MoEWeightLoader — loads a dense base checkpoint and fans out action FFN weights to MoE experts.
 
 Fan-out strategy
 ----------------
@@ -6,8 +6,8 @@ For every key of the form  ...layers/mlp_1/<leaf>  in the base checkpoint
 (e.g. ``gating_einsum``, ``linear``), N copies are written to
 ...layers/mlp_1/expert_k/<leaf>  (k = 0 … N-1).
 
-All experts start identical to the original action expert, so the model's
-initial behaviour matches the base pi0.5.  The router kernel and all LoRA
+All experts start identical to the original dense action expert, so the model's
+initial behaviour matches the corresponding dense pi0/pi0.5 checkpoint. The router kernel and all LoRA
 weights start at zero (taken from the model's randomly-initialised
 reference params).
 
@@ -35,11 +35,11 @@ import openpi.training.weight_loaders as weight_loaders
 
 @dataclasses.dataclass(frozen=True)
 class MoEWeightLoader(weight_loaders.WeightLoader):
-    """Loads pi05_base weights and fans out each action-expert FFW layer to N MoE experts.
+    """Loads dense weights and fans out each action-expert FFW layer to N MoE experts.
 
     Args:
-        base_loader: A CheckpointWeightLoader pointing at the pi05_base checkpoint.
-        num_experts: Number of MoE experts (must match Pi0MoEConfig.moe_config.num_experts).
+        base_loader: A CheckpointWeightLoader pointing at the dense base checkpoint.
+        num_experts: Number of MoE experts (must match the target model's MoEConfig).
     """
 
     base_loader: weight_loaders.CheckpointWeightLoader
@@ -80,7 +80,8 @@ class MoEWeightLoader(weight_loaders.WeightLoader):
         # This covers:
         #   - mlp_1/router/kernel          (zeros from model init)
         #   - mlp_1/expert_k/lora_*        (zeros from model init)
-        #   - action_in_proj / time_mlp_*  (random from model init)
+        #   - pi05: action_in_proj / time_mlp_*          (random from model init)
+        #   - pi0:  action_in_proj / state_proj / action_time_mlp_*  (random from model init)
         for k, v in flat_model.items():
             if k not in result:
                 result[k] = v

@@ -16,6 +16,7 @@ import tyro
 import openpi.models.model as _model
 import openpi.models.moe as moe
 import openpi.models.pi0_config as pi0_config
+import openpi.models.pi05_moe_config as pi05_moe_config
 import openpi.models.pi0_moe_config as pi0_moe_config
 import openpi.training.moe_weight_loader as moe_weight_loader
 import openpi.models.pi0_fast as pi0_fast
@@ -930,8 +931,7 @@ _CONFIGS = [
     # Same hyperparams as huihan_full_0.
     TrainConfig(
         name="moe_full_0",
-        model=pi0_moe_config.Pi0MoEConfig(
-            pi05=True,
+        model=pi05_moe_config.Pi05MoEConfig(
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
             moe_config=moe.MoEConfig(num_experts=4, top_k=1, router_z_loss_coeff=1e-3),
@@ -971,8 +971,7 @@ _CONFIGS = [
     #   4 experts, top-1 routing, 10 tasks, seed 42.
     TrainConfig(
         name="moe_full_1",
-        model=pi0_moe_config.Pi0MoEConfig(
-            pi05=True,
+        model=pi05_moe_config.Pi05MoEConfig(
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
             moe_config=moe.MoEConfig(num_experts=4, top_k=1, router_z_loss_coeff=1e-3),
@@ -1008,8 +1007,7 @@ _CONFIGS = [
     #   Same hyperparams as moe_full_1 but num_experts=1 to test speed/convergence without MoE overhead.
     TrainConfig(
         name="huihan_fast",
-        model=pi0_moe_config.Pi0MoEConfig(
-            pi05=True,
+        model=pi05_moe_config.Pi05MoEConfig(
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m_lora",
             moe_config=moe.MoEConfig(num_experts=1, top_k=1, router_z_loss_coeff=1e-3),
@@ -1044,8 +1042,7 @@ _CONFIGS = [
     # huihan_aefft_only: action expert full FT only, vision + LM frozen, single expert (dense).
     TrainConfig(
         name="huihan_aefft_only",
-        model=pi0_moe_config.Pi0MoEConfig(
-            pi05=True,
+        model=pi05_moe_config.Pi05MoEConfig(
             paligemma_variant="gemma_2b",
             action_expert_variant="gemma_300m",
             moe_config=moe.MoEConfig(num_experts=1, top_k=1, router_z_loss_coeff=1e-3),
@@ -1084,8 +1081,7 @@ _CONFIGS = [
     #   Higher LR (5e-5), larger batch (32), 5000 steps/task, 4 experts, top-1, 10 tasks, seed 42.
     TrainConfig(
         name="ae_only_0",
-        model=pi0_moe_config.Pi0MoEConfig(
-            pi05=True,
+        model=pi05_moe_config.Pi05MoEConfig(
             paligemma_variant="gemma_2b",
             action_expert_variant="gemma_300m",
             moe_config=moe.MoEConfig(num_experts=4, top_k=1, router_z_loss_coeff=1e-3),
@@ -1125,8 +1121,7 @@ _CONFIGS = [
     # Trainable params: router kernel + per-expert LoRA adapters.
     TrainConfig(
         name="pi05_libero_moe",
-        model=pi0_moe_config.Pi0MoEConfig(
-            pi05=True,
+        model=pi05_moe_config.Pi05MoEConfig(
             paligemma_variant="gemma_2b",
             action_expert_variant="gemma_300m_lora",
             moe_config=moe.MoEConfig(num_experts=4, top_k=2, router_z_loss_coeff=1e-3),
@@ -1142,14 +1137,13 @@ _CONFIGS = [
             ),
             num_experts=4,
         ),
-        freeze_filter=pi0_moe_config.Pi0MoEConfig().get_freeze_filter(),
+        freeze_filter=pi05_moe_config.Pi05MoEConfig().get_freeze_filter(),
         ema_decay=None,
     ),
     # MoE variant with huihan_config hyperparameters for direct comparison.
     TrainConfig(
         name="pi05_libero_moe_huihan",
-        model=pi0_moe_config.Pi0MoEConfig(
-            pi05=True,
+        model=pi05_moe_config.Pi05MoEConfig(
             paligemma_variant="gemma_2b",
             action_expert_variant="gemma_300m_lora",
             moe_config=moe.MoEConfig(num_experts=4, top_k=2, router_z_loss_coeff=1e-3),
@@ -1165,7 +1159,7 @@ _CONFIGS = [
             ),
             num_experts=4,
         ),
-        freeze_filter=pi0_moe_config.Pi0MoEConfig().get_freeze_filter(),
+        freeze_filter=pi05_moe_config.Pi05MoEConfig().get_freeze_filter(),
         lr_schedule=_optimizer.CosineDecaySchedule(
             warmup_steps=1_000,
             peak_lr=2.5e-5,
@@ -1176,6 +1170,31 @@ _CONFIGS = [
         batch_size=8,
         num_train_steps=10_000,
         ema_decay=None,
+    ),
+    # Pi0 MoE baseline: preserve dense pi0 preprocessing/suffix behavior while
+    # replacing the action expert FFN with a sparse MoE FFN.
+    # This minimal baseline routes on MoE(input = hidden), so the pi0 router sees
+    # the full suffix hidden representation rather than an action-only stream.
+    TrainConfig(
+        name="pi0_libero_moe",
+        model=pi0_moe_config.Pi0MoEConfig(
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m_lora",
+            moe_config=moe.MoEConfig(num_experts=4, top_k=2, router_z_loss_coeff=1e-3),
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        weight_loader=moe_weight_loader.MoEWeightLoader(
+            base_loader=weight_loaders.CheckpointWeightLoader(
+                "gs://openpi-assets/checkpoints/pi0_base/params"
+            ),
+            num_experts=4,
+        ),
+        freeze_filter=pi0_moe_config.Pi0MoEConfig().get_freeze_filter(),
+        num_train_steps=30_000,
     ),
     TrainConfig(
         name="pi0_libero_low_mem_finetune",

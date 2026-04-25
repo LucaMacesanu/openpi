@@ -1,11 +1,13 @@
-"""Pi0MoE — Pi0.5 with a Mixture-of-Experts action expert.
+"""Pi0MoE — pi0 with a Mixture-of-Experts action expert.
 
-Mirrors pi0.py exactly, with two differences:
-  1. Uses moe.MoEModule instead of gemma.Module.
-  2. compute_loss adds the router z-loss (weighted by moe_config.router_z_loss_coeff).
+This is a minimal pi0 baseline that preserves the dense pi0 suffix path:
+  - a continuous state token is still appended to the suffix
+  - timestep is still mixed into the action tokens through action_time_mlp_*
+  - the action expert FFN is swapped for an MoE FFN
 
-sample_actions is identical to Pi0 except the three-tuple return from MoEModule
-is destructured accordingly (z_loss ignored at inference time).
+The routing baseline is intentionally simple: MoE(input = hidden). For pi0,
+that means the router sees the full suffix hidden representation rather than a
+semantically isolated action-only stream.
 """
 
 from __future__ import annotations
@@ -39,7 +41,6 @@ from openpi.models.pi0 import make_attn_mask, posemb_sincos  # noqa: E402
 class Pi0MoE(_model.BaseModel):
     def __init__(self, config: Pi0MoEConfig, rngs: nnx.Rngs):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
-        self.pi05 = config.pi05
         self.moe_config = config.moe_config
 
         paligemma_config = _gemma.get_config(config.paligemma_variant)
@@ -50,10 +51,10 @@ class Pi0MoE(_model.BaseModel):
                 configs=[paligemma_config, action_expert_config],
                 embed_dtype=config.dtype,
                 moe_config=config.moe_config,
-                adarms=config.pi05,
+                adarms=False,
             )
         )
-        llm.lazy_init(rngs=rngs, method="init", use_adarms=[False, True] if config.pi05 else [False, False])
+        llm.lazy_init(rngs=rngs, method="init", use_adarms=[False, False])
 
         img = nnx_bridge.ToNNX(
             _siglip.Module(
@@ -68,11 +69,9 @@ class Pi0MoE(_model.BaseModel):
 
         self.PaliGemma = nnx.Dict(llm=llm, img=img)
         self.action_in_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
-
-        # Pi0.5 uses adaRMSNorm to inject the timestep into the action expert.
-        self.time_mlp_in = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
-        self.time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
-
+        self.state_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
+        self.action_time_mlp_in = nnx.Linear(2 * action_expert_config.width, action_expert_config.width, rngs=rngs)
+        self.action_time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
         self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
 
         self.deterministic = True
@@ -112,18 +111,32 @@ class Pi0MoE(_model.BaseModel):
         at.Bool[at.Array, " s"],
         at.Float[at.Array, "b emb"] | None,
     ]:
+        input_mask = []
+        ar_mask = []
+        tokens = []
+
+        state_token = self.state_proj(obs.state)[:, None, :]
+        tokens.append(state_token)
+        input_mask.append(jnp.ones((obs.state.shape[0], 1), dtype=jnp.bool_))
+        ar_mask += [True]
+
         action_tokens = self.action_in_proj(noisy_actions)
         time_emb = posemb_sincos(timestep, self.action_in_proj.out_features, min_period=4e-3, max_period=4.0)
-        # adaRMS conditioning
-        time_emb = self.time_mlp_in(time_emb)
-        time_emb = nnx.swish(time_emb)
-        time_emb = self.time_mlp_out(time_emb)
-        time_emb = nnx.swish(time_emb)
-        adarms_cond = time_emb
+        time_tokens = einops.repeat(time_emb, "b emb -> b s emb", s=self.action_horizon)
+        action_time_tokens = jnp.concatenate([action_tokens, time_tokens], axis=-1)
+        action_time_tokens = self.action_time_mlp_in(action_time_tokens)
+        action_time_tokens = nnx.swish(action_time_tokens)
+        action_time_tokens = self.action_time_mlp_out(action_time_tokens)
+        action_expert_tokens = action_time_tokens
+        adarms_cond = None
 
-        tokens = jnp.concatenate([action_tokens], axis=1)
-        input_mask = jnp.ones(action_tokens.shape[:2], dtype=jnp.bool_)
-        ar_mask = jnp.array([True] + [False] * (self.action_horizon - 1))
+        # Minimal pi0 baseline: route on the full pi0 suffix hidden states.
+        tokens.append(action_expert_tokens)
+        input_mask.append(jnp.ones(action_expert_tokens.shape[:2], dtype=jnp.bool_))
+        ar_mask += [True] + ([False] * (self.action_horizon - 1))
+        tokens = jnp.concatenate(tokens, axis=1)
+        input_mask = jnp.concatenate(input_mask, axis=1)
+        ar_mask = jnp.array(ar_mask)
         return tokens, input_mask, ar_mask, adarms_cond
 
     @override
