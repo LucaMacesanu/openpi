@@ -20,7 +20,8 @@ from typing_extensions import override
 from openpi.models import model as _model
 import openpi.models.gemma as _gemma
 import openpi.models.moe as moe
-from openpi.models.pi0 import make_attn_mask, posemb_sincos
+from openpi.models.pi0 import make_attn_mask
+from openpi.models.pi0 import posemb_sincos
 import openpi.models.siglip as _siglip
 from openpi.shared import array_typing as at
 
@@ -115,10 +116,15 @@ class Pi05MoE(_model.BaseModel):
         ar_mask = jnp.array([True] + [False] * (self.action_horizon - 1))
         return tokens, input_mask, ar_mask, adarms_cond
 
-    @override
-    def compute_loss(
-        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
-    ) -> at.Float[at.Array, "*b ah"]:
+    def _compute_loss(
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        actions: _model.Actions,
+        *,
+        train: bool = False,
+        return_moe_metrics: bool = False,
+    ):
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
@@ -136,16 +142,35 @@ class Pi05MoE(_model.BaseModel):
         attn_mask = make_attn_mask(input_mask, ar_mask)
         positions = jnp.cumsum(input_mask, axis=1) - 1
 
-        (_, suffix_out), _, total_z_loss = self.PaliGemma.llm(
+        llm_out = self.PaliGemma.llm(
             [prefix_tokens, suffix_tokens],
             mask=attn_mask,
             positions=positions,
             adarms_cond=[None, adarms_cond],
+            return_moe_metrics=return_moe_metrics,
         )
+        if return_moe_metrics:
+            (_, suffix_out), _, total_z_loss, moe_metrics = llm_out
+        else:
+            (_, suffix_out), _, total_z_loss = llm_out
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
         flow_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
 
-        return flow_loss + self.moe_config.router_z_loss_coeff * total_z_loss
+        loss = flow_loss + self.moe_config.router_z_loss_coeff * total_z_loss
+        if return_moe_metrics:
+            return loss, moe_metrics
+        return loss
+
+    @override
+    def compute_loss(
+        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
+    ) -> at.Float[at.Array, "*b ah"]:
+        return self._compute_loss(rng, observation, actions, train=train)
+
+    def compute_loss_with_moe_metrics(
+        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
+    ):
+        return self._compute_loss(rng, observation, actions, train=train, return_moe_metrics=True)
 
     @override
     def sample_actions(

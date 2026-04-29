@@ -1175,12 +1175,12 @@ _CONFIGS = [
     # replacing the action expert FFN with a sparse MoE FFN.
     # This minimal baseline routes on MoE(input = hidden), so the pi0 router sees
     # the full suffix hidden representation rather than an action-only stream.
-    TrainConfig(
+    TrainConfig( #####
         name="pi0_libero_moe",
         model=pi0_moe_config.Pi0MoEConfig(
             paligemma_variant="gemma_2b",
             action_expert_variant="gemma_300m_lora",
-            moe_config=moe.MoEConfig(num_experts=4, top_k=2, router_z_loss_coeff=1e-3),
+            moe_config=moe.MoEConfig(num_experts=4, top_k=1, router_z_loss_coeff=1e-3),
         ),
         data=LeRobotLiberoDataConfig(
             repo_id="physical-intelligence/libero",

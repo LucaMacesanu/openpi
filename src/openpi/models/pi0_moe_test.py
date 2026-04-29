@@ -4,9 +4,9 @@ import jax.numpy as jnp
 import numpy as np
 
 import openpi.models.moe as moe
-import openpi.models.pi05_moe_config as pi05_moe_config
 import openpi.models.pi0_config as pi0_config
 import openpi.models.pi0_moe_config as pi0_moe_config
+import openpi.models.pi05_moe_config as pi05_moe_config
 import openpi.shared.nnx_utils as nnx_utils
 import openpi.training.moe_weight_loader as moe_weight_loader
 import openpi.training.weight_loaders as weight_loaders
@@ -39,6 +39,11 @@ def test_pi0_moe_model_dummy():
     loss = nnx_utils.module_jit(model.compute_loss)(key, obs, act)
     assert loss.shape == (batch_size, config.action_horizon)
 
+    metric_loss, metrics = nnx_utils.module_jit(model.compute_loss_with_moe_metrics)(key, obs, act)
+    assert metric_loss.shape == (batch_size, config.action_horizon)
+    assert metrics["expert_usage"].shape[1] == config.moe_config.num_experts
+    assert metrics["router_entropy"].shape == metrics["expert_usage"].shape[:1]
+
     actions = nnx_utils.module_jit(model.sample_actions)(key, obs, num_steps=2)
     assert actions.shape == (batch_size, model.action_horizon, model.action_dim)
 
@@ -61,6 +66,11 @@ def test_pi05_moe_model_dummy():
 
     loss = nnx_utils.module_jit(model.compute_loss)(key, obs, act)
     assert loss.shape == (batch_size, config.action_horizon)
+
+    metric_loss, metrics = nnx_utils.module_jit(model.compute_loss_with_moe_metrics)(key, obs, act)
+    assert metric_loss.shape == (batch_size, config.action_horizon)
+    assert metrics["expert_usage"].shape[1] == config.moe_config.num_experts
+    assert metrics["router_entropy"].shape == metrics["expert_usage"].shape[:1]
 
     actions = nnx_utils.module_jit(model.sample_actions)(key, obs, num_steps=2)
     assert actions.shape == (batch_size, model.action_horizon, model.action_dim)
@@ -99,7 +109,7 @@ def test_moe_weight_loader_fans_out_dense_ffn(monkeypatch):
     }
 
     monkeypatch.setattr(moe_weight_loader.download, "maybe_download", lambda path: path)
-    monkeypatch.setattr(moe_weight_loader._model, "restore_params", lambda path, restore_type=None: base_params)
+    monkeypatch.setattr(moe_weight_loader._model, "restore_params", lambda path, restore_type=None: base_params)  # noqa: SLF001
 
     loader = moe_weight_loader.MoEWeightLoader(
         base_loader=weight_loaders.CheckpointWeightLoader("unused"),
