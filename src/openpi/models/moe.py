@@ -43,6 +43,7 @@ class MoEConfig:
     num_experts: int = 4
     top_k: int = 2
     router_z_loss_coeff: float = 1e-3
+    load_balance_loss_weight: float = 1e-2
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +72,24 @@ def _router_z_loss(router_logits):
     return jnp.mean(jnp.square(log_z))
 
 
+def _load_balance_loss(router_logits):
+    """Switch-style auxiliary loss for top-1 routing.
+
+    This couples the hard top-1 dispatch fractions with the router's softmax
+    probabilities so over-used experts are pushed down and under-used experts
+    are pushed up.
+    """
+    router_logits = router_logits.astype(jnp.float32)
+    probs = jax.nn.softmax(router_logits, axis=-1)
+    selected_experts = jnp.argmax(probs, axis=-1)
+    expert_usage = jnp.mean(
+        jax.nn.one_hot(selected_experts, router_logits.shape[-1], dtype=jnp.float32),
+        axis=tuple(range(selected_experts.ndim)),
+    )
+    mean_router_probs = jnp.mean(probs, axis=tuple(range(probs.ndim - 1)))
+    return router_logits.shape[-1] * jnp.sum(expert_usage * mean_router_probs)
+
+
 def _empty_router_metrics(num_experts: int):
     return {
         "expert_usage": jnp.zeros((num_experts,), dtype=jnp.float32),
@@ -81,6 +100,7 @@ def _empty_router_metrics(num_experts: int):
         "router_logits_std": jnp.zeros((), dtype=jnp.float32),
         "router_logits_max": jnp.zeros((), dtype=jnp.float32),
         "router_z_loss": jnp.zeros((), dtype=jnp.float32),
+        "load_balance_loss": jnp.zeros((), dtype=jnp.float32),
     }
 
 
@@ -104,6 +124,7 @@ def _router_metrics(router_logits):
         "router_logits_std": jnp.std(router_logits),
         "router_logits_max": jnp.max(router_logits),
         "router_z_loss": _router_z_loss(router_logits),
+        "load_balance_loss": _load_balance_loss(router_logits),
     }
 
 
@@ -209,6 +230,7 @@ class MoEBlock(nn.Module):
         out = []
         gates = []
         z_loss_scalar = jnp.zeros(())
+        load_balance_loss_scalar = jnp.zeros(())
         router_metrics = _empty_router_metrics(self.moe_config.num_experts)
         for i, (x, config) in enumerate(zip(xs, self.configs, strict=True)):
             if x is not None:
@@ -222,6 +244,7 @@ class MoEBlock(nn.Module):
                         name=_name("mlp", i),
                     )(x)
                     z_loss_scalar = _router_z_loss(router_logits)
+                    load_balance_loss_scalar = _load_balance_loss(router_logits)
                     router_metrics = _router_metrics(router_logits)
                 else:
                     x = lora.FeedForward(  # noqa: PLW2901
@@ -238,9 +261,9 @@ class MoEBlock(nn.Module):
         xs = [_gated_residual(x, y, gate) for x, y, gate in zip(xs, out, gates, strict=True)]
         xs = sharding.activation_sharding_constraint(xs)
 
-        # Return (carry=xs, y=(kv_cache, z_loss_scalar, router_metrics)) for nn.scan compatibility.
-        # z_loss_scalar is 0.0 when expert 1 tokens are None (prefix-only pass).
-        return xs, (kv_cache, z_loss_scalar, router_metrics)
+        # Return (carry=xs, y=(kv_cache, losses, router_metrics)) for nn.scan compatibility.
+        # Losses are 0.0 when expert 1 tokens are None (prefix-only pass).
+        return xs, (kv_cache, z_loss_scalar, load_balance_loss_scalar, router_metrics)
 
 
 # ---------------------------------------------------------------------------
@@ -308,14 +331,14 @@ class MoEModule(nn.Module):
         kv_cache: KVCache | None = None,
         deterministic: bool = True,
         return_moe_metrics: bool = False,
-    ) -> tuple[Sequence[at.Float[at.Array, "b _t _d"] | None], KVCache, at.Float[at.Array, ""]]:
-        """Returns (outputs, kv_cache, total_z_loss)."""
+    ) -> tuple[Sequence[at.Float[at.Array, "b _t _d"] | None], KVCache, at.Float[at.Array, ""], at.Float[at.Array, ""]]:
+        """Returns (outputs, kv_cache, total_z_loss, total_load_balance_loss)."""
         embedded = jax.tree.map(lambda e: e.astype(self.embed_dtype), embedded)
         mask = jnp.asarray(mask)[:, None, :, :]
         if adarms_cond is None:
             adarms_cond = [None] * len(self.configs)
 
-        embedded, (kv_cache, z_losses, router_metrics) = self.layers(
+        embedded, (kv_cache, z_losses, load_balance_losses, router_metrics) = self.layers(
             embedded, kv_cache, positions, mask, adarms_cond, deterministic
         )
 
@@ -328,11 +351,12 @@ class MoEModule(nn.Module):
 
         # z_losses has shape (depth,) — mean over layers
         total_z_loss = jnp.mean(z_losses)
+        total_load_balance_loss = jnp.mean(load_balance_losses)
 
         if return_moe_metrics:
-            return outputs, kv_cache, total_z_loss, router_metrics
+            return outputs, kv_cache, total_z_loss, total_load_balance_loss, router_metrics
 
-        return outputs, kv_cache, total_z_loss
+        return outputs, kv_cache, total_z_loss, total_load_balance_loss
 
     def init(self, use_adarms: Sequence[bool]):
         """Convenience method for initializing all parameters."""

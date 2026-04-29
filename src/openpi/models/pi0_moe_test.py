@@ -43,6 +43,7 @@ def test_pi0_moe_model_dummy():
     assert metric_loss.shape == (batch_size, config.action_horizon)
     assert metrics["expert_usage"].shape[1] == config.moe_config.num_experts
     assert metrics["router_entropy"].shape == metrics["expert_usage"].shape[:1]
+    assert metrics["load_balance_loss"].shape == metrics["expert_usage"].shape[:1]
 
     actions = nnx_utils.module_jit(model.sample_actions)(key, obs, num_steps=2)
     assert actions.shape == (batch_size, model.action_horizon, model.action_dim)
@@ -71,6 +72,7 @@ def test_pi05_moe_model_dummy():
     assert metric_loss.shape == (batch_size, config.action_horizon)
     assert metrics["expert_usage"].shape[1] == config.moe_config.num_experts
     assert metrics["router_entropy"].shape == metrics["expert_usage"].shape[:1]
+    assert metrics["load_balance_loss"].shape == metrics["expert_usage"].shape[:1]
 
     actions = nnx_utils.module_jit(model.sample_actions)(key, obs, num_steps=2)
     assert actions.shape == (batch_size, model.action_horizon, model.action_dim)
@@ -155,3 +157,13 @@ def test_pi0_moe_freeze_filter_includes_router_trainables():
     flat_paths = {".".join(path) for path in state}
     assert any("llm" in path for path in flat_paths)
     assert all("router" not in path for path in flat_paths)
+
+
+def test_top1_load_balance_loss_penalizes_collapsed_routing():
+    balanced_logits = jnp.array([[[8.0, -8.0], [-8.0, 8.0]]], dtype=jnp.float32)
+    collapsed_logits = jnp.array([[[8.0, -8.0], [8.0, -8.0]]], dtype=jnp.float32)
+
+    balanced_loss = moe._load_balance_loss(balanced_logits)  # noqa: SLF001
+    collapsed_loss = moe._load_balance_loss(collapsed_logits)  # noqa: SLF001
+
+    assert balanced_loss < collapsed_loss

@@ -39,6 +39,7 @@ def _flatten_moe_metrics(moe_metrics: dict[str, at.Array]) -> dict[str, at.Array
         "moe/router_logits_std": jnp.mean(moe_metrics["router_logits_std"]),
         "moe/router_logits_max": jnp.max(moe_metrics["router_logits_max"]),
         "moe/router_z_loss": jnp.mean(moe_metrics["router_z_loss"]),
+        "moe/load_balance_loss": jnp.mean(moe_metrics["load_balance_loss"]),
     }
 
     global_usage = jnp.mean(expert_usage, axis=0)
@@ -50,6 +51,7 @@ def _flatten_moe_metrics(moe_metrics: dict[str, at.Array]) -> dict[str, at.Array
         info[f"moe/layer_{layer_idx}/expert_usage"] = expert_usage[layer_idx]
         info[f"moe/layer_{layer_idx}/router_entropy"] = moe_metrics["router_entropy"][layer_idx]
         info[f"moe/layer_{layer_idx}/router_prob_variance"] = moe_metrics["router_prob_variance"][layer_idx]
+        info[f"moe/layer_{layer_idx}/load_balance_loss"] = moe_metrics["load_balance_loss"][layer_idx]
         for expert_idx in range(expert_usage.shape[1]):
             info[f"moe/layer_{layer_idx}/expert_{expert_idx}_usage"] = expert_usage[layer_idx, expert_idx]
 

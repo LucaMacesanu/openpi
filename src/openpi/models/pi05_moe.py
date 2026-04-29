@@ -150,13 +150,17 @@ class Pi05MoE(_model.BaseModel):
             return_moe_metrics=return_moe_metrics,
         )
         if return_moe_metrics:
-            (_, suffix_out), _, total_z_loss, moe_metrics = llm_out
+            (_, suffix_out), _, total_z_loss, total_load_balance_loss, moe_metrics = llm_out
         else:
-            (_, suffix_out), _, total_z_loss = llm_out
+            (_, suffix_out), _, total_z_loss, total_load_balance_loss = llm_out
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
         flow_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
 
-        loss = flow_loss + self.moe_config.router_z_loss_coeff * total_z_loss
+        loss = (
+            flow_loss
+            + self.moe_config.router_z_loss_coeff * total_z_loss
+            + self.moe_config.load_balance_loss_weight * total_load_balance_loss
+        )
         if return_moe_metrics:
             return loss, moe_metrics
         return loss
@@ -190,7 +194,7 @@ class Pi05MoE(_model.BaseModel):
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
-        _, kv_cache, _ = self.PaliGemma.llm(
+        _, kv_cache, _, _ = self.PaliGemma.llm(
             [prefix_tokens, None], mask=prefix_attn_mask, positions=positions
         )
 
@@ -204,7 +208,7 @@ class Pi05MoE(_model.BaseModel):
             full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
             positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
 
-            (prefix_out, suffix_out), _, _ = self.PaliGemma.llm(
+            (prefix_out, suffix_out), _, _, _ = self.PaliGemma.llm(
                 [None, suffix_tokens],
                 mask=full_attn_mask,
                 positions=positions,
