@@ -18,6 +18,7 @@ import openpi.models.moe as moe
 import openpi.models.pi0_config as pi0_config
 import openpi.models.pi05_moe_config as pi05_moe_config
 import openpi.models.pi0_moe_config as pi0_moe_config
+import openpi.models.pi0_residual_moe_config as pi0_residual_moe_config
 import openpi.training.moe_weight_loader as moe_weight_loader
 import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
@@ -1194,6 +1195,33 @@ _CONFIGS = [
             num_experts=4,
         ),
         freeze_filter=pi0_moe_config.Pi0MoEConfig().get_freeze_filter(),
+        num_train_steps=30_000,
+    ),
+    TrainConfig(
+        name="pi0_libero_residual_moe",
+        model=pi0_residual_moe_config.Pi0ResidualMoEConfig(
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m_lora",
+            moe_config=moe.ResidualMoEConfig(
+                num_experts=8,
+                top_k=1,
+                router_z_loss_coeff=1e-3,
+                load_balance_loss_weight=1e-2,
+                expert_hidden_dim=128,
+                residual_scale=1.0,
+            ),
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        weight_loader=moe_weight_loader.ResidualMoEWeightLoader(
+            base_loader=weight_loaders.CheckpointWeightLoader(
+                "gs://openpi-assets/checkpoints/pi0_base/params"
+            )
+        ),
+        freeze_filter=pi0_residual_moe_config.Pi0ResidualMoEConfig().get_freeze_filter(),
         num_train_steps=30_000,
     ),
     TrainConfig(

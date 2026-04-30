@@ -87,3 +87,21 @@ class MoEWeightLoader(weight_loaders.WeightLoader):
                 result[k] = v
 
         return flax.traverse_util.unflatten_dict(result, sep="/")
+
+
+@dataclasses.dataclass(frozen=True)
+class ResidualMoEWeightLoader(weight_loaders.WeightLoader):
+    """Loads a dense checkpoint into a residual-MoE model.
+
+    Matching dense keys are restored directly, while all new router and
+    residual-expert parameters fall back to the model's reference init.
+    """
+
+    base_loader: weight_loaders.CheckpointWeightLoader
+
+    def load(self, params: at.Params) -> at.Params:
+        base_params = _model.restore_params(
+            download.maybe_download(self.base_loader.params_path),
+            restore_type=np.ndarray,
+        )
+        return weight_loaders._merge_params(base_params, params, missing_regex=".*")

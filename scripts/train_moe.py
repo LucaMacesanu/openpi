@@ -48,10 +48,10 @@ def _flatten_moe_metrics(moe_metrics: dict[str, at.Array]) -> dict[str, at.Array
         info[f"moe/global_expert_{expert_idx}_usage"] = global_usage[expert_idx]
 
     for layer_idx in range(expert_usage.shape[0]):
-        info[f"moe/layer_{layer_idx}/expert_usage"] = expert_usage[layer_idx]
-        info[f"moe/layer_{layer_idx}/router_entropy"] = moe_metrics["router_entropy"][layer_idx]
-        info[f"moe/layer_{layer_idx}/router_prob_variance"] = moe_metrics["router_prob_variance"][layer_idx]
-        info[f"moe/layer_{layer_idx}/load_balance_loss"] = moe_metrics["load_balance_loss"][layer_idx]
+        info[f"moe_layers/layer_{layer_idx}/expert_usage"] = expert_usage[layer_idx]
+        info[f"moe_layers/layer_{layer_idx}/router_entropy"] = moe_metrics["router_entropy"][layer_idx]
+        info[f"moe_layers/layer_{layer_idx}/router_prob_variance"] = moe_metrics["router_prob_variance"][layer_idx]
+        info[f"moe_layers/layer_{layer_idx}/load_balance_loss"] = moe_metrics["load_balance_loss"][layer_idx]
         for expert_idx in range(expert_usage.shape[1]):
             info[f"moe/layer_{layer_idx}/expert_{expert_idx}_usage"] = expert_usage[layer_idx, expert_idx]
 

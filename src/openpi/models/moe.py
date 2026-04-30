@@ -41,9 +41,35 @@ class MoEConfig:
     """Configuration for the MoE action expert."""
 
     num_experts: int = 4
-    top_k: int = 2
+    top_k: int = 1
     router_z_loss_coeff: float = 1e-3
     load_balance_loss_weight: float = 1e-2
+
+
+@dataclasses.dataclass(frozen=True)
+class ResidualMoEConfig:
+    """Configuration for a residual MoE action expert.
+
+    The dense action-expert FFN remains always active, while a router selects
+    one small residual expert whose output is added on top.
+    """
+
+    num_experts: int = 8
+    top_k: int = 1
+    router_z_loss_coeff: float = 1e-3
+    load_balance_loss_weight: float = 1e-2
+    expert_hidden_dim: int = 128
+    residual_scale: float = 1.0
+    residual_linear_init_std: float = 1e-4
+    router_init_std: float = 1e-3
+
+    def __post_init__(self):
+        if self.top_k != 1:
+            raise ValueError("ResidualMoEConfig currently supports top_k=1 only.")
+        if self.num_experts < 1:
+            raise ValueError("ResidualMoEConfig requires at least one expert.")
+        if self.expert_hidden_dim < 1:
+            raise ValueError("ResidualMoEConfig requires a positive expert_hidden_dim.")
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +217,135 @@ class MoEFeedForward(nn.Module):
         return output, router_logits
 
 
+class ResidualExpertFeedForward(nn.Module):
+    """Small residual expert with near-zero output initialization."""
+
+    features: int
+    hidden_dim: int
+    linear_init_std: float
+
+    @nn.compact
+    def __call__(self, x):
+        dtype = x.dtype
+        w_gating = self.param(
+            "gating_einsum",
+            nn.initializers.lecun_normal(in_axis=-2, out_axis=-1, batch_axis=(0,)),
+            (2, self.features, self.hidden_dim),
+        ).astype(dtype)
+        ff_gate = jnp.dot(x, w_gating[0])
+        gate_value = nn.gelu(ff_gate)
+
+        ff1 = jnp.dot(x, w_gating[1])
+        activations = gate_value * ff1
+
+        w_linear = self.param(
+            "linear",
+            nn.initializers.normal(stddev=self.linear_init_std),
+            (self.hidden_dim, self.features),
+        ).astype(dtype)
+        outputs = jnp.dot(activations, w_linear)
+        assert outputs.dtype == dtype
+        return outputs
+
+
+class ResidualMoEFeedForward(nn.Module):
+    """Dense FFN plus a routed residual expert branch.
+
+    The base FFN stays at the original `mlp_1/*` parameter paths so dense
+    checkpoints can load it directly. Routing only applies to the small
+    residual experts.
+    """
+
+    features: int
+    hidden_dim: int
+    moe_config: ResidualMoEConfig
+    lora_config: lora.LoRAConfig | None = None
+
+    def setup(self):
+        self.w_gating = self.param(
+            "gating_einsum",
+            nn.initializers.lecun_normal(in_axis=-2, out_axis=-1, batch_axis=(0,)),
+            (2, self.features, self.hidden_dim),
+        )
+        self.w_linear = self.param(
+            "linear",
+            nn.initializers.lecun_normal(in_axis=-2, out_axis=-1),
+            (self.hidden_dim, self.features),
+        )
+        self.w_gating_lora = None
+        self.w_linear_lora = None
+        if self.lora_config:
+            self.w_gating_lora = (
+                self.param("gating_einsum_lora_a", self.lora_config.init_fn, (2, self.features, self.lora_config.rank)),
+                self.param(
+                    "gating_einsum_lora_b", self.lora_config.init_fn, (2, self.lora_config.rank, self.hidden_dim)
+                ),
+            )
+            self.w_linear_lora = (
+                self.param("linear_lora_a", self.lora_config.init_fn, (self.hidden_dim, self.lora_config.rank)),
+                self.param("linear_lora_b", self.lora_config.init_fn, (self.lora_config.rank, self.features)),
+            )
+
+        for k in range(self.moe_config.num_experts):
+            setattr(
+                self,
+                f"expert_{k}",
+                ResidualExpertFeedForward(
+                    features=self.features,
+                    hidden_dim=self.moe_config.expert_hidden_dim,
+                    linear_init_std=self.moe_config.residual_linear_init_std,
+                ),
+            )
+
+        self.router = nn.Dense(
+            self.moe_config.num_experts,
+            use_bias=False,
+            kernel_init=nn.initializers.normal(stddev=self.moe_config.router_init_std),
+        )
+
+    def __call__(self, x):
+        dtype = x.dtype
+        router_logits = self.router(x)
+        router_probs = jax.nn.softmax(router_logits.astype(jnp.float32), axis=-1)
+        selected_experts = jnp.argmax(router_probs, axis=-1)
+
+        base = self._dense_ffn(x)
+        expert_outputs = jnp.stack(
+            [getattr(self, f"expert_{k}")(x) for k in range(self.moe_config.num_experts)],
+            axis=-2,
+        )
+        one_hot = jax.nn.one_hot(selected_experts, self.moe_config.num_experts, dtype=dtype)
+        residual = jnp.einsum("...e,...ed->...d", one_hot, expert_outputs)
+        output = base + jnp.asarray(self.moe_config.residual_scale, dtype=dtype) * residual
+
+        assert output.dtype == dtype
+        return output, router_logits
+
+    def _dense_ffn(self, x):
+        ff_gate = self._dot(
+            x,
+            self.w_gating[0],
+            None if self.w_gating_lora is None else (self.w_gating_lora[0][0], self.w_gating_lora[1][0]),
+        )
+        gate_value = nn.gelu(ff_gate)
+
+        ff1 = self._dot(
+            x,
+            self.w_gating[1],
+            None if self.w_gating_lora is None else (self.w_gating_lora[0][1], self.w_gating_lora[1][1]),
+        )
+        activations = gate_value * ff1
+        outputs = self._dot(activations, self.w_linear, self.w_linear_lora)
+        assert outputs.dtype == x.dtype
+        return outputs
+
+    def _dot(self, x: at.Array, w: at.Array, lora_weights: tuple[at.Array, at.Array] | None) -> at.Array:
+        base = jnp.dot(x, w.astype(x.dtype))
+        if lora_weights is None:
+            return base
+        return base + jnp.dot(jnp.dot(x, lora_weights[0].astype(x.dtype)), lora_weights[1].astype(x.dtype))
+
+
 # ---------------------------------------------------------------------------
 # MoE Block
 # ---------------------------------------------------------------------------
@@ -263,6 +418,74 @@ class MoEBlock(nn.Module):
 
         # Return (carry=xs, y=(kv_cache, losses, router_metrics)) for nn.scan compatibility.
         # Losses are 0.0 when expert 1 tokens are None (prefix-only pass).
+        return xs, (kv_cache, z_loss_scalar, load_balance_loss_scalar, router_metrics)
+
+
+class ResidualMoEBlock(nn.Module):
+    """Transformer block with a residual MoE action expert."""
+
+    configs: tuple[_gemma.Config, ...]
+    moe_config: ResidualMoEConfig
+
+    dropout: float = 0.0
+    dropout_bdims: tuple[int, ...] = ()
+
+    @nn.compact
+    def __call__(self, xs, kv_cache, positions, attn_mask, adarms_cond, deterministic=True):  # noqa: FBT002
+        xs = sharding.activation_sharding_constraint(xs)
+        drop = nn.Dropout(self.dropout, self.dropout_bdims) if self.dropout else lambda x, _: x
+
+        attn = _gemma.Attention(configs=self.configs, name="attn")
+
+        pre_attn = []
+        gates = []
+        for i, x in enumerate(xs):
+            if x is not None:
+                x, gate = _gemma.RMSNorm(name=_name("pre_attention_norm", i))(x, adarms_cond[i])  # noqa: PLW2901
+            pre_attn.append(x)
+            gates.append(gate if x is not None else None)
+
+        pre_attn = sharding.activation_sharding_constraint(pre_attn)
+        post_attn, kv_cache = attn(pre_attn, positions, attn_mask, kv_cache)
+        post_attn = jax.tree.map(lambda x: drop(x, deterministic), post_attn)
+        post_attn = sharding.activation_sharding_constraint(post_attn)
+        xs = [_gated_residual(x, y, gate) for x, y, gate in zip(xs, post_attn, gates, strict=True)]
+        xs = sharding.activation_sharding_constraint(xs)
+
+        out = []
+        gates = []
+        z_loss_scalar = jnp.zeros(())
+        load_balance_loss_scalar = jnp.zeros(())
+        router_metrics = _empty_router_metrics(self.moe_config.num_experts)
+        for i, (x, config) in enumerate(zip(xs, self.configs, strict=True)):
+            if x is not None:
+                x, gate = _gemma.RMSNorm(name=_name("pre_ffw_norm", i))(x, adarms_cond[i])  # noqa: PLW2901
+                if i == 1:
+                    x, router_logits = ResidualMoEFeedForward(  # noqa: PLW2901
+                        features=config.width,
+                        hidden_dim=config.mlp_dim,
+                        moe_config=self.moe_config,
+                        lora_config=config.lora_configs.get("ffn"),
+                        name=_name("mlp", i),
+                    )(x)
+                    z_loss_scalar = _router_z_loss(router_logits)
+                    load_balance_loss_scalar = _load_balance_loss(router_logits)
+                    router_metrics = _router_metrics(router_logits)
+                else:
+                    x = lora.FeedForward(  # noqa: PLW2901
+                        features=config.width,
+                        hidden_dim=config.mlp_dim,
+                        name=_name("mlp", i),
+                        lora_config=config.lora_configs.get("ffn"),
+                    )(x)
+            out.append(x)
+            gates.append(gate if x is not None else None)
+
+        out = sharding.activation_sharding_constraint(out)
+        out = jax.tree.map(lambda x: drop(x, deterministic), out)
+        xs = [_gated_residual(x, y, gate) for x, y, gate in zip(xs, out, gates, strict=True)]
+        xs = sharding.activation_sharding_constraint(xs)
+
         return xs, (kv_cache, z_loss_scalar, load_balance_loss_scalar, router_metrics)
 
 
@@ -360,6 +583,102 @@ class MoEModule(nn.Module):
 
     def init(self, use_adarms: Sequence[bool]):
         """Convenience method for initializing all parameters."""
+        self.embed(jnp.zeros((1, 1), dtype=jnp.int32))
+        self(
+            [jnp.zeros((1, 1, c.width)) for c in self.configs],
+            jnp.zeros((1, len(self.configs)), dtype=jnp.int32),
+            jnp.zeros((1, len(self.configs), len(self.configs)), dtype=bool),
+            adarms_cond=[
+                jnp.zeros((1, c.width)) if u else None
+                for u, c in zip(use_adarms, self.configs, strict=True)
+            ],
+        )
+
+
+class ResidualMoEModule(nn.Module):
+    """Transformer with a residual MoE action expert; mirrors gemma.Module."""
+
+    configs: Sequence[_gemma.Config]
+    embed_dtype: str
+    moe_config: ResidualMoEConfig
+
+    dropout: float = 0.0
+    dropout_bdims: tuple[int, ...] = ()
+    adarms: bool = False
+
+    def setup(self):
+        assert all(config.depth == self.configs[0].depth for config in self.configs)
+
+        self.embedder = _gemma.Embedder(
+            vocab_size=_gemma.PALIGEMMA_VOCAB_SIZE,
+            embed_dim=self.configs[0].width,
+            name="embedder",
+        )
+        block_cls = nn.remat(
+            ResidualMoEBlock,
+            prevent_cse=False,
+            static_argnums=(5,),
+            policy=jax.checkpoint_policies.nothing_saveable,
+        )
+        self.layers = nn.scan(
+            block_cls,
+            variable_axes={"params": 0},
+            split_rngs={"params": True, "dropout": True},
+            in_axes=(
+                0,
+                nn.broadcast,
+                nn.broadcast,
+                nn.broadcast,
+                nn.broadcast,
+            ),
+            length=self.configs[0].depth,
+        )(
+            configs=self.configs,
+            moe_config=self.moe_config,
+            dropout=self.dropout,
+            dropout_bdims=self.dropout_bdims,
+        )
+        self.final_norms = [_gemma.RMSNorm(name=_name("final_norm", i)) for i in range(len(self.configs))]
+
+    def embed(self, tokens: at.Int[at.Array, "b t"]) -> at.Float[at.Array, "b t d"]:
+        return self.embedder.encode(tokens).astype(self.embed_dtype)
+
+    def __call__(
+        self,
+        embedded: Sequence[at.Float[at.Array, "b _t _d"] | None],
+        positions: at.Int[at.Array, "b t"],
+        mask: at.Bool[at.Array, "b t s"],
+        adarms_cond: Sequence[at.Float[at.Array, "b _d"] | None] | None = None,
+        *,
+        kv_cache: KVCache | None = None,
+        deterministic: bool = True,
+        return_moe_metrics: bool = False,
+    ) -> tuple[Sequence[at.Float[at.Array, "b _t _d"] | None], KVCache, at.Float[at.Array, ""], at.Float[at.Array, ""]]:
+        embedded = jax.tree.map(lambda e: e.astype(self.embed_dtype), embedded)
+        mask = jnp.asarray(mask)[:, None, :, :]
+        if adarms_cond is None:
+            adarms_cond = [None] * len(self.configs)
+
+        embedded, (kv_cache, z_losses, load_balance_losses, router_metrics) = self.layers(
+            embedded, kv_cache, positions, mask, adarms_cond, deterministic
+        )
+
+        assert all(e.dtype == jnp.dtype(self.embed_dtype) for e in embedded if e is not None)
+
+        outputs = [
+            f(e, a)[0] if e is not None else e
+            for f, e, a in zip(self.final_norms, embedded, adarms_cond, strict=True)
+        ]
+
+        total_z_loss = jnp.mean(z_losses)
+        total_load_balance_loss = jnp.mean(load_balance_losses)
+
+        if return_moe_metrics:
+            return outputs, kv_cache, total_z_loss, total_load_balance_loss, router_metrics
+
+        return outputs, kv_cache, total_z_loss, total_load_balance_loss
+
+    def init(self, use_adarms: Sequence[bool]):
         self.embed(jnp.zeros((1, 1), dtype=jnp.int32))
         self(
             [jnp.zeros((1, 1, c.width)) for c in self.configs],
