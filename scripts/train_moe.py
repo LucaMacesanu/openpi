@@ -29,31 +29,49 @@ except ModuleNotFoundError:
     import train as base_train
 
 
-def _flatten_moe_metrics(moe_metrics: dict[str, at.Array]) -> dict[str, at.Array]:
+def _flatten_moe_metrics(
+    moe_metrics: dict[str, at.Array], *, active_layer_indices: list[int] | None = None
+) -> dict[str, at.Array]:
     expert_usage = moe_metrics["expert_usage"]
-    info = {
-        "moe/router_prob_mean": jnp.mean(moe_metrics["router_prob_mean"]),
-        "moe/router_prob_variance": jnp.mean(moe_metrics["router_prob_variance"]),
-        "moe/router_entropy": jnp.mean(moe_metrics["router_entropy"]),
-        "moe/router_logits_mean": jnp.mean(moe_metrics["router_logits_mean"]),
-        "moe/router_logits_std": jnp.mean(moe_metrics["router_logits_std"]),
-        "moe/router_logits_max": jnp.max(moe_metrics["router_logits_max"]),
-        "moe/router_z_loss": jnp.mean(moe_metrics["router_z_loss"]),
-        "moe/load_balance_loss": jnp.mean(moe_metrics["load_balance_loss"]),
-    }
+    if expert_usage.shape[0] == 0:
+        info = {
+            "moe/router_prob_mean": jnp.zeros((), dtype=jnp.float32),
+            "moe/router_prob_variance": jnp.zeros((), dtype=jnp.float32),
+            "moe/router_entropy": jnp.zeros((), dtype=jnp.float32),
+            "moe/router_logits_mean": jnp.zeros((), dtype=jnp.float32),
+            "moe/router_logits_std": jnp.zeros((), dtype=jnp.float32),
+            "moe/router_logits_max": jnp.zeros((), dtype=jnp.float32),
+            "moe/router_z_loss": jnp.zeros((), dtype=jnp.float32),
+            "moe/load_balance_loss": jnp.zeros((), dtype=jnp.float32),
+        }
+        global_usage = jnp.zeros((expert_usage.shape[1],), dtype=expert_usage.dtype)
+    else:
+        info = {
+            "moe/router_prob_mean": jnp.mean(moe_metrics["router_prob_mean"]),
+            "moe/router_prob_variance": jnp.mean(moe_metrics["router_prob_variance"]),
+            "moe/router_entropy": jnp.mean(moe_metrics["router_entropy"]),
+            "moe/router_logits_mean": jnp.mean(moe_metrics["router_logits_mean"]),
+            "moe/router_logits_std": jnp.mean(moe_metrics["router_logits_std"]),
+            "moe/router_logits_max": jnp.max(moe_metrics["router_logits_max"]),
+            "moe/router_z_loss": jnp.mean(moe_metrics["router_z_loss"]),
+            "moe/load_balance_loss": jnp.mean(moe_metrics["load_balance_loss"]),
+        }
+        global_usage = jnp.mean(expert_usage, axis=0)
 
-    global_usage = jnp.mean(expert_usage, axis=0)
     info["moe/global_expert_usage"] = global_usage
     for expert_idx in range(expert_usage.shape[1]):
         info[f"moe/global_expert_{expert_idx}_usage"] = global_usage[expert_idx]
 
-    for layer_idx in range(expert_usage.shape[0]):
-        info[f"moe_layers/layer_{layer_idx}/expert_usage"] = expert_usage[layer_idx]
-        info[f"moe_layers/layer_{layer_idx}/router_entropy"] = moe_metrics["router_entropy"][layer_idx]
-        info[f"moe_layers/layer_{layer_idx}/router_prob_variance"] = moe_metrics["router_prob_variance"][layer_idx]
-        info[f"moe_layers/layer_{layer_idx}/load_balance_loss"] = moe_metrics["load_balance_loss"][layer_idx]
+    if active_layer_indices is None:
+        active_layer_indices = list(range(expert_usage.shape[0]))
+
+    for metric_idx, layer_idx in enumerate(active_layer_indices):
+        info[f"moe_layers/layer_{layer_idx}/expert_usage"] = expert_usage[metric_idx]
+        info[f"moe_layers/layer_{layer_idx}/router_entropy"] = moe_metrics["router_entropy"][metric_idx]
+        info[f"moe_layers/layer_{layer_idx}/router_prob_variance"] = moe_metrics["router_prob_variance"][metric_idx]
+        info[f"moe_layers/layer_{layer_idx}/load_balance_loss"] = moe_metrics["load_balance_loss"][metric_idx]
         for expert_idx in range(expert_usage.shape[1]):
-            info[f"moe/layer_{layer_idx}/expert_{expert_idx}_usage"] = expert_usage[layer_idx, expert_idx]
+            info[f"moe/layer_{layer_idx}/expert_{expert_idx}_usage"] = expert_usage[metric_idx, expert_idx]
 
     return info
 
@@ -112,7 +130,7 @@ def train_step(
         "grad_norm": optax.global_norm(grads),
         "param_norm": optax.global_norm(kernel_params),
     }
-    info.update(_flatten_moe_metrics(moe_metrics))
+    info.update(_flatten_moe_metrics(moe_metrics, active_layer_indices=getattr(config.model, "moe_layers", None)))
     return new_state, info
 
 

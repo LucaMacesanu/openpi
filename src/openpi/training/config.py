@@ -1202,11 +1202,12 @@ _CONFIGS = [
         model=pi0_residual_moe_config.Pi0ResidualMoEConfig(
             paligemma_variant="gemma_2b",
             action_expert_variant="gemma_300m_lora",
+            moe_layers=[12, 13, 14, 15, 16, 17],
             moe_config=moe.ResidualMoEConfig(
                 num_experts=8,
                 top_k=1,
                 router_z_loss_coeff=1e-3,
-                load_balance_loss_weight=1e-2,
+                load_balance_loss_weight=1e-3,
                 expert_hidden_dim=128,
                 residual_scale=1.0,
             ),
