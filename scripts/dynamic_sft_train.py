@@ -1,25 +1,32 @@
-"""Sequential fine-tuning (SFT) script for continual learning research.
+"""Sequential fine-tuning script with DynMoE adaptive expert update.
 
-Trains a pi0.5 policy on a sequence of Libero tasks one at a time, using the
-pi05_libero_low_mem_finetune config (LoRA on both paligemma and action expert).
+Mirrors sft_train.py exactly, with one addition: after each task's checkpoint
+is saved, if the config uses Pi0DynMoEConfig, runs adaptive_update_experts()
+to prune dead experts and seed new experts from unrouted token embeddings.
 
-After completing each task, saves a checkpoint under its own subdirectory and
-writes a `tasks_trained.json` file recording the ordered list of all tasks the
-model has been trained on up to that point.
+This script is designed to be a drop-in replacement for sft_train.py when
+training with the pi05_libero_dyn_moe config.
 
 Usage:
-    CUDA_VISIBLE_DEVICES=4,7 uv run scripts/sft_train.py \
-        --tasks "pick up the black bowl between the plate and the ramekin and place it on the plate" \
-                "open the top drawer and put the bowl inside" \
-        --steps_per_task 5000 \
-        --exp_name sft_run_0 \
+    CUDA_VISIBLE_DEVICES=4,7 uv run scripts/dynamic_sft_train.py \\
+        --config_name pi05_libero_dyn_moe \\
+        --num_tasks 5 \\
+        --steps_per_task 5000 \\
+        --exp_name dyn_moe_run_0 \\
         --checkpoint_dir /local_data/lim2045/openpi/checkpoints/sft_checkpoints
 
-Checkpoint layout:
+    Or via run_sft.sh:
+        bash shells/run_sft.sh \\
+            --config_name pi05_libero_dyn_moe \\
+            --num_tasks 5 \\
+            --steps_per_task 5000 \\
+            --exp_name dyn_moe_run_0
+
+Checkpoint layout (same as sft_train.py):
     {checkpoint_dir}/{exp_name}/
         task_00_{task_name_slug}/
             {step}/                  <- orbax checkpoint
-            tasks_trained.json       <- cumulative task list up to this point
+            metadata.json            <- cumulative task list + config info
         task_01_{task_name_slug}/
             ...
 """
@@ -56,6 +63,7 @@ import openpi.training.utils as training_utils
 import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as _transforms
 from flax.traverse_util import flatten_dict, unflatten_dict
+
 
 def _load_weights_and_validate(loader, params_shape: at.Params) -> at.Params:
     loaded_params = loader.load(params_shape)
@@ -122,6 +130,7 @@ def train_step(
     }
     return new_state, info
 
+
 @at.typecheck
 def init_train_state(
     config: _config.TrainConfig, init_rng: at.KeyArrayLike, mesh: jax.sharding.Mesh, *, resume: bool
@@ -130,18 +139,14 @@ def init_train_state(
 
     def init(rng: at.KeyArrayLike, partial_params: at.Params | None = None) -> training_utils.TrainState:
         rng, model_rng = jax.random.split(rng)
-        # initialize the model (and its parameters).
         model = config.model.create(model_rng)
 
-        # Merge the partial params into the model.
         if partial_params is not None:
             graphdef, state = nnx.split(model)
-            # This will produce an error if the partial params are not a subset of the state.
             state.replace_by_pure_dict(partial_params)
             model = nnx.merge(graphdef, state)
 
         params = nnx.state(model)
-        # Convert frozen params to bfloat16.
         params = nnx_utils.state_map(params, config.freeze_filter, lambda p: p.replace(p.value.astype(jnp.bfloat16)))
 
         return training_utils.TrainState(
@@ -163,15 +168,15 @@ def init_train_state(
     partial_params = _load_weights_and_validate(config.weight_loader, train_state_shape.params.to_pure_dict())
     replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
-    # Initialize the train state and mix in the partial params.
     train_state = jax.jit(
         init,
-        donate_argnums=(1,),  # donate the partial params buffer.
+        donate_argnums=(1,),
         in_shardings=replicated_sharding,
         out_shardings=state_sharding,
     )(init_rng, partial_params)
 
     return train_state, state_sharding
+
 
 def init_logging():
     """Custom logging format for better readability."""
@@ -191,96 +196,48 @@ def init_logging():
     logger.setLevel(logging.INFO)
     logger.handlers[0].setFormatter(formatter)
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-
-
-
 
 # ---------------------------------------------------------------------------
-# CLI arguments
+# CLI arguments (identical to sft_train.py)
 # ---------------------------------------------------------------------------
+
 
 @dataclasses.dataclass
 class SFTArgs:
-    # Ordered list of task name strings exactly as they appear in the dataset.
-    # Mutually exclusive with --num_tasks. Run with --list_tasks to browse.
     tasks: list[str] = dataclasses.field(default_factory=list)
-
-    # If > 0, randomly sample this many tasks from the full dataset instead of
-    # specifying them explicitly with --tasks.
     num_tasks: int = 0
-
-    # Seed used when randomly sampling tasks with --num_tasks.
     task_seed: int = 42
-
-    # Number of gradient steps to train on each task.
     steps_per_task: int = 5_000
-
-    # Named config to use as the base training config.
-    config_name: str = "pi05_libero_sft"
-
-    # Config name whose precomputed norm stats to use. Defaults to pi05_libero_low_mem_finetune
-    # since all SFT configs share the same dataset and embodiment. Only change this if you have
-    # computed norm stats for a different config.
+    config_name: str = "pi05_libero_dyn_moe"
     norm_stats_from: str = "pi0_libero_low_mem_finetune"
-
-    # Experiment name — used for W&B run name and the parent checkpoint subdirectory.
-    exp_name: str = "sft_run"
-
-    # Root directory where per-task checkpoint subdirectories will be created.
+    exp_name: str = "dyn_moe_run"
     checkpoint_dir: str = "/local_data/lim2045/openpi/checkpoints/sft_checkpoints"
-
-    # Global batch size (must be divisible by the number of JAX devices).
     batch_size: int = 32
-
-    # DataLoader worker processes.
     num_workers: int = 2
-
-    # Log training metrics every N steps.
     log_interval: int = 100
-
-    # Enable Weights & Biases logging.
     wandb_enabled: bool = True
-
-    # Random seed.
     seed: int = 42
-
-    # If set, save an intermediate checkpoint every N steps within each task.
-    # A final checkpoint is always saved at the end of each task regardless.
     checkpoint_interval: int | None = None
-
-    # If True, print all available task names and exit without training.
     list_tasks: bool = False
+    # Number of batches used to collect routing statistics for adaptive update.
+    num_record_batches: int = 50
 
 
 # ---------------------------------------------------------------------------
-# Task / episode helpers
+# Task / episode helpers (unchanged from sft_train.py)
 # ---------------------------------------------------------------------------
+
 
 def list_available_tasks(repo_id: str) -> list[str]:
-    """Return all task names present in the dataset."""
     meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
     return list(meta.tasks.values())
 
-
-# ---------------------------------------------------------------------------
-# Per-task data loader
-# ---------------------------------------------------------------------------
 
 def create_task_data_loader(
     config: _config.TrainConfig,
     task_name: str,
     data_sharding: jax.sharding.Sharding,
 ) -> _data_loader.DataLoader:
-    """Build a DataLoader containing only frames that belong to *task_name*.
-
-    Loads the FULL LeRobotDataset so that lerobot's episode_data_index covers
-    all episodes (required for correct delta-timestamp lookups), then filters
-    down to task frames using torch.utils.data.Subset before applying transforms.
-    Filtering by passing `episodes=` to LeRobotDataset fails for v2.0 datasets
-    because the sparse global episode indices exceed the dense index array size.
-    """
     import torch.utils.data as torch_data
 
     data_config = config.data.create(config.assets_dirs, config.model)
@@ -294,7 +251,6 @@ def create_task_data_loader(
         )
     task_idx = dataset_meta.task_to_task_index[task_name]
 
-    # Load full dataset — no episode filter so episode_data_index spans all episodes.
     raw_dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
         delta_timestamps={
@@ -303,7 +259,6 @@ def create_task_data_loader(
         },
     )
 
-    # Inject task prompt before subsetting (transform reads task_index from each frame).
     if data_config.prompt_from_task:
         prompted = _data_loader.TransformedDataset(
             raw_dataset,
@@ -312,18 +267,14 @@ def create_task_data_loader(
     else:
         prompted = raw_dataset
 
-    # Find frame-level indices for this task.
     task_frame_indices = [
         i for i, t in enumerate(raw_dataset.hf_dataset["task_index"])
         if int(t) == task_idx
     ]
     logging.info(
-        f"Task '{task_name}': {len(task_frame_indices)} frames "
-        f"(task_index={task_idx})"
+        f"Task '{task_name}': {len(task_frame_indices)} frames (task_index={task_idx})"
     )
 
-    # Subset to task frames; Subset.__getitem__ maps local -> global index,
-    # so raw_dataset's full episode_data_index handles lookups correctly.
     task_dataset = torch_data.Subset(prompted, task_frame_indices)
     task_dataset = _data_loader.transform_dataset(task_dataset, data_config)
 
@@ -339,12 +290,7 @@ def create_task_data_loader(
     return _data_loader.DataLoaderImpl(data_config, loader)
 
 
-# ---------------------------------------------------------------------------
-# Checkpoint metadata
-# ---------------------------------------------------------------------------
-
-def save_metadata(task_ckpt_dir: Path, tasks_trained: list[str], args: "SFTArgs", base_config) -> None:
-    """Write metadata.json alongside the orbax checkpoint directory."""
+def save_metadata(task_ckpt_dir: Path, tasks_trained: list[str], args: SFTArgs, base_config) -> None:
     metadata = {
         "tasks_trained": tasks_trained,
         "num_tasks_trained": len(tasks_trained),
@@ -362,20 +308,66 @@ def save_metadata(task_ckpt_dir: Path, tasks_trained: list[str], args: "SFTArgs"
 
 
 # ---------------------------------------------------------------------------
+# DynMoE adaptive update helper
+# ---------------------------------------------------------------------------
+
+
+def maybe_run_adaptive_update(
+    config: _config.TrainConfig,
+    train_state: training_utils.TrainState,
+    task_name: str,
+    data_sharding: jax.sharding.Sharding,
+    num_record_batches: int,
+) -> training_utils.TrainState:
+    """Run DynMoE adaptive expert update if the config is Pi0DynMoEConfig.
+
+    Reconstructs the NNX model from the train state, runs routing statistics
+    collection, updates router params in-place, then writes the updated params
+    back into a new TrainState.
+
+    Returns:
+        Updated train_state (same structure, updated router params if DynMoE).
+    """
+    from openpi.models.pi0_dyn_moe_config import Pi0DynMoEConfig
+
+    if not isinstance(config.model, Pi0DynMoEConfig):
+        return train_state
+
+    logging.info("DynMoE: running adaptive expert update after task '%s'...", task_name)
+
+    from openpi.models.dyn_moe import adaptive_update_experts
+
+    # Reconstruct model from train state (on CPU to save memory).
+    model = nnx.merge(train_state.model_def, train_state.params)
+    model.eval()
+
+    # Build a short recording data loader for this task.
+    record_loader = create_task_data_loader(config, task_name, data_sharding)
+    record_iter = iter(record_loader)
+
+    adaptive_update_experts(model, record_iter, num_record_batches=num_record_batches)
+
+    # Write updated params back into the train state.
+    updated_params = nnx.state(model)
+    new_train_state = dataclasses.replace(train_state, params=updated_params)
+
+    logging.info("DynMoE: adaptive expert update complete.")
+    return new_train_state
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main(args: SFTArgs) -> None:
     init_logging()
     logging.info(f"Running on: {platform.node()}")
 
     base_config = _config.get_config(args.config_name)
-    # Override the config name to point assets_dirs at an existing norm stats folder.
-    # All SFT configs share the same dataset/embodiment so norms are interchangeable.
     base_config = dataclasses.replace(base_config, name=args.norm_stats_from)
     repo_id = base_config.data.repo_id
 
-    # --list_tasks: just print and exit.
     if args.list_tasks:
         tasks = list_available_tasks(repo_id)
         print(f"\nAvailable tasks in '{repo_id}':")
@@ -406,8 +398,6 @@ def main(args: SFTArgs) -> None:
         + "\n".join(f"  {i}: {t}" for i, t in enumerate(args.tasks))
     )
 
-    # Build a config with CLI overrides applied.
-    # exp_name is set to a placeholder here; checkpoint dirs are managed manually.
     config = dataclasses.replace(
         base_config,
         exp_name=args.exp_name,
@@ -430,7 +420,6 @@ def main(args: SFTArgs) -> None:
         str(epath.Path("~/.cache/jax").expanduser()),
     )
 
-    # Top-level checkpoint dir: {checkpoint_dir}/{exp_name}/
     run_ckpt_root = Path(args.checkpoint_dir) / args.exp_name
     run_ckpt_root.mkdir(parents=True, exist_ok=True)
 
@@ -445,7 +434,6 @@ def main(args: SFTArgs) -> None:
         mesh, jax.sharding.PartitionSpec()
     )
 
-    # W&B — single run covering all tasks.
     if args.wandb_enabled:
         wandb.init(
             name=args.exp_name,
@@ -459,11 +447,6 @@ def main(args: SFTArgs) -> None:
     else:
         wandb.init(mode="disabled")
 
-    # ------------------------------------------------------------------
-    # Initialize train state once from the base pi0.5 checkpoint.
-    # Model weights carry over across tasks; the step counter and optimizer
-    # state continue uninterrupted so the LR schedule runs smoothly.
-    # ------------------------------------------------------------------
     train_state, train_state_sharding = init_train_state(
         config, init_rng, mesh, resume=False
     )
@@ -473,7 +456,6 @@ def main(args: SFTArgs) -> None:
         f"{training_utils.array_tree_to_info(train_state.params)}"
     )
 
-    # JIT-compile the train step once; reused across all tasks.
     ptrain_step = jax.jit(
         functools.partial(train_step, config),
         in_shardings=(replicated_sharding, train_state_sharding, data_sharding),
@@ -481,11 +463,8 @@ def main(args: SFTArgs) -> None:
         donate_argnums=(1,),
     )
 
-    # ------------------------------------------------------------------
-    # Sequential task loop
-    # ------------------------------------------------------------------
     tasks_trained_so_far: list[str] = []
-    global_step_offset = 0  # for W&B x-axis continuity
+    global_step_offset = 0
 
     for task_idx, task_name in enumerate(args.tasks):
         logging.info(
@@ -494,7 +473,6 @@ def main(args: SFTArgs) -> None:
             f"{'=' * 64}"
         )
 
-        # Per-task checkpoint directory.
         safe_slug = task_name.replace(" ", "_")[:50]
         task_ckpt_dir = run_ckpt_root / f"task_{task_idx:02d}_{safe_slug}"
 
@@ -505,12 +483,10 @@ def main(args: SFTArgs) -> None:
             resume=False,
         )
 
-        # Build data loader for this task (filters full dataset by task_index at frame level).
         data_loader = create_task_data_loader(config, task_name, data_sharding)
         data_iter = iter(data_loader)
         batch = next(data_iter)
 
-        # Train for steps_per_task steps.
         pbar = tqdm.tqdm(
             range(args.steps_per_task),
             total=args.steps_per_task,
@@ -553,7 +529,15 @@ def main(args: SFTArgs) -> None:
         _checkpoints.save_state(checkpoint_manager, train_state, data_loader, final_step)
         checkpoint_manager.wait_until_finished()
 
-        # Record this task and write cumulative metadata.
+        # ----------------------------------------------------------------
+        # DynMoE adaptive expert update (runs after checkpoint is saved).
+        # Prunes dead experts, seeds new experts from unrouted token embeddings.
+        # Only active when config.model is Pi0DynMoEConfig; no-op otherwise.
+        # ----------------------------------------------------------------
+        train_state = maybe_run_adaptive_update(
+            config, train_state, task_name, data_sharding, args.num_record_batches
+        )
+
         tasks_trained_so_far.append(task_name)
         save_metadata(task_ckpt_dir, list(tasks_trained_so_far), args, base_config)
 

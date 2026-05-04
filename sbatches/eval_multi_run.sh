@@ -21,7 +21,7 @@
 # Runs up to 4 eval_run.sh workers in parallel (one per GPU).
 # ---------------------------------------------------------------------------
 
-cd /scratch/lim2045/openpi
+cd /local_data/lim2045/openpi
 source .venv/bin/activate
 
 export WANDB_API_KEY=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

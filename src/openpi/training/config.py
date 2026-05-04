@@ -18,11 +18,15 @@ import openpi.models.moe as moe
 import openpi.models.pi0_config as pi0_config
 import openpi.models.pi0_moe_config as pi0_moe_config
 import openpi.training.moe_weight_loader as moe_weight_loader
+import openpi.models.dyn_moe as dyn_moe
+import openpi.models.pi0_dyn_moe_config as pi0_dyn_moe_config
+import openpi.training.dyn_moe_weight_loader as dyn_moe_weight_loader
 import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.yor_policy as yor_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -356,6 +360,43 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotYorDataConfig(DataConfigFactory):
+    """Data config for the YOR bimanual robot, right-arm-only fine-tuning.
+
+    Observations: ZED stereo camera + fish1 fisheye, right arm joints + right gripper (8 dims).
+    Actions: action.right_delta_joints = [Δrj0-6, right_gripper_absolute] (8 dims), padded to action_dim=32.
+    """
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transforms = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform({
+                    "observation/zed":       "observation.images.zed",
+                    "observation/fish_right": "observation.images.fish1",
+                    "observation/state":      "observation.state",
+                    "actions":                "action.right_delta_joints",
+                    "prompt":                 "prompt",
+                })
+            ]
+        )
+        data_transforms = _transforms.Group(
+            inputs=[yor_policy.YorRightArmInputs(model_type=model_config.model_type)],
+            outputs=[yor_policy.YorRightArmOutputs()],
+        )
+        model_transforms = ModelTransformFactory(
+            default_prompt="place the orange cube on the plate",
+        )(model_config)
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=("action.right_delta_joints",),
         )
 
 
@@ -699,6 +740,51 @@ _CONFIGS = [
             paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
         ).get_freeze_filter(),
         # Turn off EMA for LoRA finetuning.
+        ema_decay=None,
+    ),
+    # YOR robot, right-arm-only fine-tune on place_the_orange_cube_on_the_plate (success episodes only).
+    # action_dim stays at default 32 to match pi05_base checkpoint shapes; YorRightArmOutputs slices [:7].
+    TrainConfig(
+        name="pi05_yor_right_arm",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotYorDataConfig(
+            repo_id="place_the_orange_cube_on_the_plate_success",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params"
+        ),
+        freeze_filter=nnx.Any(
+            nnx.All(nnx_utils.PathRegex(".*llm.*"), nnx.Not(nnx_utils.PathRegex(".*llm.*_1.*"))),
+            nnx.All(nnx_utils.PathRegex(".*llm.*_1.*"), nnx.Not(nnx_utils.PathRegex(".*lora.*"))),
+        ),
+        num_train_steps=10_000,
+        batch_size=32,
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi0_yor_right_arm",
+        model=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotYorDataConfig(
+            repo_id="place_the_orange_cube_on_the_plate_success",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi0_base/params"
+        ),
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ).get_freeze_filter(),
+        num_train_steps=10_000,
+        batch_size=32,
         ema_decay=None,
     ),
     # pi05 SFT configs: PaliGemma backbone fully frozen, only action-expert LoRA adapters are trained.
@@ -1076,6 +1162,33 @@ _CONFIGS = [
         num_train_steps=10_000,
         ema_decay=None,
     ),
+    # Pi0.5 DynMoE: action expert FFW replaced with Dynamic Mixture-of-Experts.
+    # Top-Any gating (sigmoid thresholds, variable k per token) + diverse-and-simple
+    # auxiliary loss. Experts can be added/removed between tasks via adaptive_update_experts().
+    # Use with scripts/dynamic_sft_train.py instead of sft_train.py.
+    TrainConfig(
+        name="pi05_libero_dyn_moe",
+        model=pi0_dyn_moe_config.Pi0DynMoEConfig(
+            pi05=True,
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m_lora",
+            dyn_moe_config=dyn_moe.DynMoEConfig(num_experts=2, max_experts=4, aux_loss_coeff=1e-3),
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        weight_loader=dyn_moe_weight_loader.DynMoEWeightLoader(
+            base_loader=weight_loaders.CheckpointWeightLoader(
+                "gs://openpi-assets/checkpoints/pi05_base/params"
+            ),
+            num_experts=2,
+            max_experts=4,
+        ),
+        freeze_filter=pi0_dyn_moe_config.Pi0DynMoEConfig().get_freeze_filter(),
+        ema_decay=None,
+    ),
     TrainConfig(
         name="pi0_libero_low_mem_finetune",
         # Here is an example of loading a pi0 model for LoRA fine-tuning.
@@ -1192,7 +1305,7 @@ _CONFIGS = [
         ),
         ema_decay=None,
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        checkpoint_base_dir="/scratch/lim2045/openpi/checkpoints",
+        checkpoint_base_dir="/local_data/lim2045/openpi/checkpoints",
         num_train_steps=10_000,
     ),
     #

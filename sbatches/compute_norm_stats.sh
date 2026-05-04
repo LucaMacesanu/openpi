@@ -33,10 +33,10 @@ done
 
 echo "Computing norm stats for config: $CONFIG_NAME"
 
-cd /scratch/lim2045/singularity
+cd /local_data/lim2045/singularity
 singularity exec /share/apps/images/cuda12.1.1-cudnn8.9.0-devel-ubuntu22.04.2.sif /bin/bash
 
-cd /scratch/lim2045/openpi
+cd /local_data/lim2045/openpi
 source .venv/bin/activate
 
 export WANDB_API_KEY=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
