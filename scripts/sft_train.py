@@ -220,10 +220,9 @@ class SFTArgs:
     # Named config to use as the base training config.
     config_name: str = "pi05_libero_sft"
 
-    # Config name whose precomputed norm stats to use. Defaults to pi05_libero_low_mem_finetune
-    # since all SFT configs share the same dataset and embodiment. Only change this if you have
-    # computed norm stats for a different config.
-    norm_stats_from: str = "pi0_libero_low_mem_finetune"
+    # Optional config name whose precomputed norm stats to use. If omitted,
+    # use the selected config's own assets, matching train.py behavior.
+    norm_stats_from: str | None = None
 
     # Experiment name — used for W&B run name and the parent checkpoint subdirectory.
     exp_name: str = "sft_run"
@@ -374,9 +373,10 @@ def main(args: SFTArgs) -> None:
     logging.info(f"Running on: {platform.node()}")
 
     base_config = _config.get_config(args.config_name)
-    # Override the config name to point assets_dirs at an existing norm stats folder.
-    # All SFT configs share the same dataset/embodiment so norms are interchangeable.
-    base_config = dataclasses.replace(base_config, name=args.norm_stats_from)
+    if args.norm_stats_from is not None:
+        # Override the config name to point assets_dirs at an existing norm stats folder.
+        # All SFT configs share the same dataset/embodiment so norms are interchangeable.
+        base_config = dataclasses.replace(base_config, name=args.norm_stats_from)
     repo_id = base_config.data.repo_id
 
     # --list_tasks: just print and exit.
