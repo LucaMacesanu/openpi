@@ -1,0 +1,13 @@
+# Libero Object tasks in canonical order (from notes/canonical_task_order.txt).
+# One task per line. Lines starting with # are ignored by run_sft_ordered.sh.
+# Task names are lowercase without trailing periods to match the LeRobot dataset.
+pick up the alphabet soup and place it in the basket
+pick up the bbq sauce and place it in the basket
+pick up the butter and place it in the basket
+pick up the chocolate pudding and place it in the basket
+pick up the cream cheese and place it in the basket
+pick up the ketchup and place it in the basket
+pick up the milk and place it in the basket
+pick up the orange juice and place it in the basket
+pick up the salad dressing and place it in the basket
+pick up the tomato sauce and place it in the basket

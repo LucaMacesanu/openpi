@@ -24,6 +24,7 @@ EXP_DIR=""
 NUM_TRIALS=10
 HOST="0.0.0.0"
 PORT=8000
+STEP=""
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -35,6 +36,7 @@ while [[ $# -gt 0 ]]; do
         --num_trials)     NUM_TRIALS="$2";     shift 2 ;;
         --host)           HOST="$2";           shift 2 ;;
         --port)           PORT="$2";           shift 2 ;;
+        --step)           STEP="$2";           shift 2 ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
 done
@@ -59,6 +61,9 @@ fi
 # ---------------------------------------------------------------------------
 NUM_TRAINED=$(python3 -c "import json; d=json.load(open('$TASKS_JSON')); print(d['num_tasks_trained'])")
 EVAL_PHASE=$(python3 -c "print(f'after_task_{int(\"$NUM_TRAINED\") - 1:02d}')")
+if [[ -n "$STEP" ]]; then
+    EVAL_PHASE="${EVAL_PHASE}_step_${STEP}"
+fi
 EVAL_DIR="$EXP_DIR/evals/$EVAL_PHASE"
 
 echo "============================================================"
