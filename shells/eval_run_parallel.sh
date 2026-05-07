@@ -28,6 +28,7 @@ SERVER_TIMEOUT=900
 STAGGER_DELAY=30  # stagger within a concurrent batch to avoid BLAS init races
 MAX_PARALLEL=""   # empty = auto (set to N_GPUS after parsing)
 FORCE=0           # if 1, skip the already-done check and re-evaluate everything
+UV_BIN="${UV_BIN:-uv}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -257,6 +258,6 @@ echo ""
 echo "All parallel evals finished. Results in: $RUN_DIR/evals/"
 
 echo "Compiling eval summary..."
-uv run scripts/compile_eval_results.py "$RUN_DIR/evals"
+"$UV_BIN" run scripts/compile_eval_results.py "$RUN_DIR/evals"
 
 exit $EXIT_CODE

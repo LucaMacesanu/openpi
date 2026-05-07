@@ -21,6 +21,7 @@ PORT=8000
 POLL_INTERVAL=5   # seconds between readiness checks
 TIMEOUT=300       # seconds to wait before giving up
 CONFIG="pi05_libero_sft"
+UV_BIN="${UV_BIN:-uv}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -51,7 +52,7 @@ echo "[serve_policy] Port       : $PORT"            >&2
 echo "[serve_policy] Log        : $LOG_FILE"        >&2
 
 CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" \
-    uv run "$OPENPI_ROOT/scripts/serve_policy.py" \
+    "$UV_BIN" run "$OPENPI_ROOT/scripts/serve_policy.py" \
         --port="$PORT" \
         policy:checkpoint \
         --policy.config="$CONFIG" \
