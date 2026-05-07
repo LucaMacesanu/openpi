@@ -77,12 +77,18 @@ echo "============================================================"
 mkdir -p "$EVAL_DIR"
 
 # ---------------------------------------------------------------------------
-# Activate libero venv
+# Activate openpi venv
 # ---------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OPENPI_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-source "$OPENPI_ROOT/examples/libero/.venv/bin/activate"
+VENV_ACTIVATE="$OPENPI_ROOT/.venv/bin/activate"
+if [[ ! -f "$VENV_ACTIVATE" ]]; then
+    echo "Error: openpi venv not found: $VENV_ACTIVATE"
+    exit 1
+fi
+
+source "$VENV_ACTIVATE"
 export PYTHONPATH="${PYTHONPATH:-}:$OPENPI_ROOT/third_party/libero"
 
 # ---------------------------------------------------------------------------
