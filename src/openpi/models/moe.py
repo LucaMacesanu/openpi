@@ -162,8 +162,8 @@ def _router_metrics(router_logits):
 class MoEFeedForward(nn.Module):
     """Sparse MoE feed-forward layer.
 
-    Replaces a single lora.FeedForward with N experts + a linear router.
-    Returns (output, router_logits) so the caller can compute z-loss.
+    Keeps a dense FFN at the original parameter path and adds N experts plus a
+    linear router. The dense path is used when layer-wise MoE is disabled.
     """
 
     features: int
@@ -172,6 +172,30 @@ class MoEFeedForward(nn.Module):
     lora_config: lora.LoRAConfig | None = None
 
     def setup(self):
+        self.w_gating = self.param(
+            "gating_einsum",
+            nn.initializers.lecun_normal(in_axis=-2, out_axis=-1, batch_axis=(0,)),
+            (2, self.features, self.hidden_dim),
+        )
+        self.w_linear = self.param(
+            "linear",
+            nn.initializers.lecun_normal(in_axis=-2, out_axis=-1),
+            (self.hidden_dim, self.features),
+        )
+        self.w_gating_lora = None
+        self.w_linear_lora = None
+        if self.lora_config:
+            self.w_gating_lora = (
+                self.param("gating_einsum_lora_a", self.lora_config.init_fn, (2, self.features, self.lora_config.rank)),
+                self.param(
+                    "gating_einsum_lora_b", self.lora_config.init_fn, (2, self.lora_config.rank, self.hidden_dim)
+                ),
+            )
+            self.w_linear_lora = (
+                self.param("linear_lora_a", self.lora_config.init_fn, (self.hidden_dim, self.lora_config.rank)),
+                self.param("linear_lora_b", self.lora_config.init_fn, (self.lora_config.rank, self.features)),
+            )
+
         for k in range(self.moe_config.num_experts):
             setattr(
                 self,
@@ -189,14 +213,19 @@ class MoEFeedForward(nn.Module):
             kernel_init=nn.initializers.zeros,
         )
 
-    def __call__(self, x):
+    def __call__(self, x, *, moe_enabled: bool | at.Bool[at.Array, ""] = True):
         # x: (B, T, D) — may be bfloat16 or float32
-        dtype = x.dtype
+        moe_output, router_logits = self._moe_ffn(x)
+        dense_output = self._dense_ffn(x)
+        output = jnp.where(moe_enabled, moe_output, dense_output)
+        return output, router_logits
 
+    def _moe_ffn(self, x):
+        dtype = x.dtype
         # Router may upcast to float32; keep logits at full precision for numerical
         # stability, but cast weights/one-hot back to x.dtype so the output
         # (which feeds back into the scan carry) stays in the original dtype.
-        router_logits = self.router(x)  # (B, T, num_experts)
+        router_logits = self.router(x).astype(jnp.float32)  # (B, T, num_experts)
 
         # Top-K gating
         top_k_logits, top_k_indices = jax.lax.top_k(router_logits, self.moe_config.top_k)
@@ -215,6 +244,30 @@ class MoEFeedForward(nn.Module):
 
         assert output.dtype == dtype
         return output, router_logits
+
+    def _dense_ffn(self, x):
+        ff_gate = self._dot(
+            x,
+            self.w_gating[0],
+            None if self.w_gating_lora is None else (self.w_gating_lora[0][0], self.w_gating_lora[1][0]),
+        )
+        gate_value = nn.gelu(ff_gate)
+
+        ff1 = self._dot(
+            x,
+            self.w_gating[1],
+            None if self.w_gating_lora is None else (self.w_gating_lora[0][1], self.w_gating_lora[1][1]),
+        )
+        activations = gate_value * ff1
+        outputs = self._dot(activations, self.w_linear, self.w_linear_lora)
+        assert outputs.dtype == x.dtype
+        return outputs
+
+    def _dot(self, x: at.Array, w: at.Array, lora_weights: tuple[at.Array, at.Array] | None) -> at.Array:
+        base = jnp.dot(x, w.astype(x.dtype))
+        if lora_weights is None:
+            return base
+        return base + jnp.dot(jnp.dot(x, lora_weights[0].astype(x.dtype)), lora_weights[1].astype(x.dtype))
 
 
 class ResidualExpertFeedForward(nn.Module):
@@ -362,7 +415,7 @@ class MoEBlock(nn.Module):
     dropout_bdims: tuple[int, ...] = ()
 
     @nn.compact
-    def __call__(self, xs, kv_cache, positions, attn_mask, adarms_cond, deterministic=True):  # noqa: FBT002
+    def __call__(self, xs, kv_cache, positions, attn_mask, adarms_cond, moe_enabled, deterministic=True):  # noqa: FBT002
         xs = sharding.activation_sharding_constraint(xs)
         drop = nn.Dropout(self.dropout, self.dropout_bdims) if self.dropout else lambda x, _: x
 
@@ -398,10 +451,15 @@ class MoEBlock(nn.Module):
                         moe_config=self.moe_config,
                         lora_config=config.lora_configs.get("ffn"),
                         name=_name("mlp", i),
-                    )(x)
-                    z_loss_scalar = _router_z_loss(router_logits)
-                    load_balance_loss_scalar = _load_balance_loss(router_logits)
-                    router_metrics = _router_metrics(router_logits)
+                    )(x, moe_enabled=moe_enabled)
+                    z_loss_scalar = jnp.where(moe_enabled, _router_z_loss(router_logits), jnp.zeros((), jnp.float32))
+                    load_balance_loss_scalar = jnp.where(
+                        moe_enabled, _load_balance_loss(router_logits), jnp.zeros((), jnp.float32)
+                    )
+                    router_metrics = jax.tree.map(
+                        lambda value: jnp.where(moe_enabled, value, jnp.zeros_like(value)),
+                        _router_metrics(router_logits),
+                    )
                 else:
                     x = lora.FeedForward(  # noqa: PLW2901
                         features=config.width,
@@ -508,6 +566,7 @@ class MoEModule(nn.Module):
     configs: Sequence[_gemma.Config]
     embed_dtype: str
     moe_config: MoEConfig
+    moe_layers: tuple[int, ...] | None = None
 
     dropout: float = 0.0
     dropout_bdims: tuple[int, ...] = ()
@@ -524,9 +583,14 @@ class MoEModule(nn.Module):
         block_cls = nn.remat(
             MoEBlock,
             prevent_cse=False,
-            static_argnums=(5,),
+            static_argnums=(6,),
             policy=jax.checkpoint_policies.nothing_saveable,
         )
+        if self.moe_layers is None:
+            self._active_moe_layers = tuple(range(self.configs[0].depth))
+        else:
+            self._active_moe_layers = tuple(self.moe_layers)
+        self._moe_layer_mask = tuple(layer in self._active_moe_layers for layer in range(self.configs[0].depth))
         self.layers = nn.scan(
             block_cls,
             variable_axes={"params": 0},
@@ -536,6 +600,7 @@ class MoEModule(nn.Module):
                 nn.broadcast,
                 nn.broadcast,
                 nn.broadcast,
+                0,
                 nn.broadcast,
             ),
             length=self.configs[0].depth,
@@ -568,7 +633,13 @@ class MoEModule(nn.Module):
             adarms_cond = [None] * len(self.configs)
 
         embedded, (kv_cache, z_losses, load_balance_losses, router_metrics) = self.layers(
-            embedded, kv_cache, positions, mask, adarms_cond, deterministic
+            embedded,
+            kv_cache,
+            positions,
+            mask,
+            adarms_cond,
+            jnp.asarray(self._moe_layer_mask, dtype=jnp.bool_),
+            deterministic,
         )
 
         assert all(e.dtype == jnp.dtype(self.embed_dtype) for e in embedded if e is not None)
@@ -578,9 +649,15 @@ class MoEModule(nn.Module):
             for f, e, a in zip(self.final_norms, embedded, adarms_cond, strict=True)
         ]
 
-        # z_losses has shape (depth,) — mean over layers
-        total_z_loss = jnp.mean(z_losses)
-        total_load_balance_loss = jnp.mean(load_balance_losses)
+        if self._active_moe_layers:
+            active_moe_layers = jnp.asarray(self._active_moe_layers, dtype=jnp.int32)
+            total_z_loss = jnp.mean(z_losses[active_moe_layers])
+            total_load_balance_loss = jnp.mean(load_balance_losses[active_moe_layers])
+            router_metrics = jax.tree.map(lambda value: value[active_moe_layers], router_metrics)
+        else:
+            total_z_loss = jnp.zeros((), dtype=z_losses.dtype)
+            total_load_balance_loss = jnp.zeros((), dtype=load_balance_losses.dtype)
+            router_metrics = jax.tree.map(lambda value: value[:0], router_metrics)
 
         if return_moe_metrics:
             return outputs, kv_cache, total_z_loss, total_load_balance_loss, router_metrics

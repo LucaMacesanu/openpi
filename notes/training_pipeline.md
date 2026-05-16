@@ -41,7 +41,7 @@ Key defaults:
 | flag | default |
 |---|---|
 | `--config_name` | `pi05_libero_sft` |
-| `--norm_stats_from` | `pi0_libero_low_mem_finetune` |
+| `--norm_stats_from` | selected config |
 | `--steps_per_task` | 5000 |
 | `--batch_size` | 32 |
 | `--checkpoint_dir` | `/scratch/lim2045/openpi/checkpoints/sft_checkpoints` |
@@ -57,9 +57,9 @@ are possible with a single sbatch:
 The actual training logic. Key behaviors:
 
 **Config loading**: calls `_config.get_config(args.config_name)` from
-`src/openpi/training/config.py`, then overrides `name` with `norm_stats_from`
-so asset/norm-stat paths resolve against an existing pre-computed directory
-(all SFT configs share the same embodiment so norms are interchangeable).
+`src/openpi/training/config.py`. If `--norm_stats_from` is set, it overrides
+`name` so asset/norm-stat paths resolve against an existing pre-computed
+directory; otherwise the selected config's own assets are used.
 
 **Data loading**: loads the *full* `physical-intelligence/libero` LeRobot dataset,
 then filters to per-task frames by matching `task_index` at the frame level

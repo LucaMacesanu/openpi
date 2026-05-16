@@ -17,6 +17,7 @@ def test_pi0_moe_config_defaults():
     config = pi0_moe_config.Pi0MoEConfig()
     assert config.pi05 is False
     assert config.discrete_state_input is False
+    assert config.moe_layers is None
 
 
 def test_pi05_moe_config_defaults():
@@ -61,6 +62,54 @@ def test_pi0_moe_model_dummy():
     suffix_tokens, _, _, adarms_cond = model.embed_suffix(obs, act, jnp.ones((batch_size,)))
     assert suffix_tokens.shape[1] == config.action_horizon + 1
     assert adarms_cond is None
+
+
+def test_pi0_moe_subset_layers_only_report_active_metrics():
+    key = jax.random.key(0)
+    config = pi0_moe_config.Pi0MoEConfig(
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+        moe_layers=[1, 3],
+        moe_config=moe.MoEConfig(num_experts=2, top_k=1, router_z_loss_coeff=1e-3),
+    )
+    model = config.create(key)
+
+    obs, act = config.fake_obs(2), config.fake_act(2)
+    _, metrics = nnx_utils.module_jit(model.compute_loss_with_moe_metrics)(key, obs, act)
+
+    assert metrics["expert_usage"].shape == (2, config.moe_config.num_experts)
+    assert metrics["router_entropy"].shape == (2,)
+    assert metrics["load_balance_loss"].shape == (2,)
+
+
+def test_pi0_moe_no_active_layers_reports_empty_metrics():
+    key = jax.random.key(0)
+    config = pi0_moe_config.Pi0MoEConfig(
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+        moe_layers=[],
+        moe_config=moe.MoEConfig(num_experts=2, top_k=1, router_z_loss_coeff=1e-3),
+    )
+    model = config.create(key)
+
+    obs, act = config.fake_obs(2), config.fake_act(2)
+    loss, metrics = nnx_utils.module_jit(model.compute_loss_with_moe_metrics)(key, obs, act)
+
+    assert loss.shape == (2, config.action_horizon)
+    assert metrics["expert_usage"].shape == (0, config.moe_config.num_experts)
+    assert metrics["router_entropy"].shape == (0,)
+    assert metrics["load_balance_loss"].shape == (0,)
+
+
+def test_pi0_moe_invalid_layer_selection_raises():
+    config = pi0_moe_config.Pi0MoEConfig(
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+        moe_layers=[4],
+    )
+
+    with np.testing.assert_raises_regex(ValueError, "moe_layers must be between 0 and 3"):
+        config.create(jax.random.key(0))
 
 
 def test_pi05_moe_model_dummy():
@@ -183,6 +232,8 @@ def test_moe_weight_loader_fans_out_dense_ffn(monkeypatch):
     model_params = {
         "layers": {
             "mlp_1": {
+                "gating_einsum": np.full((2, 3), -2.0, dtype=np.float32),
+                "linear": np.full((3, 4), -3.0, dtype=np.float32),
                 "expert_0": {
                     "gating_einsum": np.zeros((2, 3), dtype=np.float32),
                     "linear": np.zeros((3, 4), dtype=np.float32),
@@ -207,6 +258,14 @@ def test_moe_weight_loader_fans_out_dense_ffn(monkeypatch):
     )
     loaded = loader.load(model_params)
 
+    np.testing.assert_array_equal(
+        loaded["layers"]["mlp_1"]["gating_einsum"],
+        base_params["layers"]["mlp_1"]["gating_einsum"],
+    )
+    np.testing.assert_array_equal(
+        loaded["layers"]["mlp_1"]["linear"],
+        base_params["layers"]["mlp_1"]["linear"],
+    )
     np.testing.assert_array_equal(
         loaded["layers"]["mlp_1"]["expert_0"]["gating_einsum"],
         base_params["layers"]["mlp_1"]["gating_einsum"],
@@ -358,6 +417,42 @@ def test_residual_scale_zero_matches_dense_pi0_sampling(monkeypatch):
     residual_actions = nnx_utils.module_jit(residual_model.sample_actions)(key, obs, num_steps=2, noise=noise)
 
     np.testing.assert_allclose(np.asarray(residual_actions), np.asarray(dense_actions), atol=1e-6)
+
+
+def test_pi0_moe_no_moe_layers_matches_dense_pi0_sampling(monkeypatch):
+    key = jax.random.key(0)
+    dense_config = pi0_config.Pi0Config(
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+    )
+    moe_config = pi0_moe_config.Pi0MoEConfig(
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+        moe_layers=[],
+        moe_config=moe.MoEConfig(num_experts=2, top_k=1, router_z_loss_coeff=1e-3),
+    )
+
+    dense_model = dense_config.create(key)
+    dense_params = nnx.state(dense_model).to_pure_dict()
+    moe_ref_params = nnx.state(moe_config.create(key)).to_pure_dict()
+
+    monkeypatch.setattr(moe_weight_loader.download, "maybe_download", lambda path: path)
+    monkeypatch.setattr(moe_weight_loader._model, "restore_params", lambda path, restore_type=None: dense_params)  # noqa: SLF001
+    loader = moe_weight_loader.MoEWeightLoader(
+        base_loader=weight_loaders.CheckpointWeightLoader("unused"),
+        num_experts=2,
+    )
+    moe_params = loader.load(moe_ref_params)
+    moe_model = moe_config.load(moe_params)
+
+    batch_size = 2
+    obs = dense_config.fake_obs(batch_size)
+    noise = jnp.ones((batch_size, dense_config.action_horizon, dense_config.action_dim), dtype=jnp.float32)
+
+    dense_actions = nnx_utils.module_jit(dense_model.sample_actions)(key, obs, num_steps=2, noise=noise)
+    moe_actions = nnx_utils.module_jit(moe_model.sample_actions)(key, obs, num_steps=2, noise=noise)
+
+    np.testing.assert_allclose(np.asarray(moe_actions), np.asarray(dense_actions), atol=1e-6)
 
 
 def test_no_moe_layers_matches_dense_pi0_sampling(monkeypatch):

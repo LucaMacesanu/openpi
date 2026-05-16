@@ -14,7 +14,7 @@
 #       [--cuda_devices 0,1] \
 #       [--batch_size 32] \
 #       [--config_name pi05_libero_sft] \
-#       [--norm_stats_from pi0_libero_low_mem_finetune] \
+#       [--norm_stats_from CONFIG_NAME] \
 #       [--checkpoint_interval 1000] \
 #       [--wandb_enabled true]
 #
@@ -34,7 +34,7 @@ CUDA_DEVICES=""
 BATCH_SIZE=32
 WANDB_ENABLED=true
 CONFIG_NAME="pi05_libero_sft"
-NORM_STATS_FROM="pi0_libero_low_mem_finetune"
+NORM_STATS_FROM=""
 CHECKPOINT_INTERVAL=""
 RESUME=false
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.8
@@ -70,7 +70,7 @@ if [[ -z "$TASKS_FILES" ]]; then
     echo "  --cuda_devices    0,1,...           CUDA_VISIBLE_DEVICES value (default: all)"
     echo "  --batch_size      N                Global batch size (default: 32)"
     echo "  --config_name     NAME             Training config (default: pi05_libero_sft)"
-    echo "  --norm_stats_from NAME             Config for norm stats (default: pi0_libero_low_mem_finetune)"
+    echo "  --norm_stats_from NAME             Config for norm stats (default: selected config)"
     echo "  --wandb_enabled   true|false       W&B logging (default: true)"
     echo "  --checkpoint_interval N            Save intermediate checkpoint every N steps"
     echo "  --resume          true|false       Resume from last completed/partial checkpoint (default: false)"
@@ -109,9 +109,12 @@ CMD=(
     --checkpoint_dir  "$CHECKPOINT_DIR"
     --batch_size      "$BATCH_SIZE"
     --config_name     "$CONFIG_NAME"
-    --norm_stats_from "$NORM_STATS_FROM"
     --tasks           "${TASKS[@]}"
 )
+
+if [[ -n "$NORM_STATS_FROM" ]]; then
+    CMD+=(--norm_stats_from "$NORM_STATS_FROM")
+fi
 
 if [[ "$WANDB_ENABLED" == "true" ]]; then
     CMD+=(--wandb_enabled)
@@ -140,6 +143,7 @@ for i in "${!TASKS[@]}"; do
     printf "    %02d: %s\n" "$i" "${TASKS[$i]}"
 done
 echo "  Config      : $CONFIG_NAME"
+echo "  Norm stats  : ${NORM_STATS_FROM:-$CONFIG_NAME}"
 echo "  Steps/task  : $STEPS_PER_TASK"
 echo "  Checkpoint  : $CHECKPOINT_DIR/$EXP_NAME"
 if [[ -n "$CHECKPOINT_INTERVAL" ]]; then

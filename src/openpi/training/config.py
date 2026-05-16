@@ -1181,11 +1181,38 @@ _CONFIGS = [
         model=pi0_moe_config.Pi0MoEConfig(
             paligemma_variant="gemma_2b",
             action_expert_variant="gemma_300m_lora",
+            moe_layers=[12, 13, 14, 15, 16, 17],
             moe_config=moe.MoEConfig(num_experts=4, top_k=1, router_z_loss_coeff=1e-3),
         ),
         data=LeRobotLiberoDataConfig(
             repo_id="physical-intelligence/libero",
             base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        weight_loader=moe_weight_loader.MoEWeightLoader(
+            base_loader=weight_loaders.CheckpointWeightLoader(
+                "gs://openpi-assets/checkpoints/pi0_base/params"
+            ),
+            num_experts=4,
+        ),
+        freeze_filter=pi0_moe_config.Pi0MoEConfig().get_freeze_filter(),
+        num_train_steps=30_000,
+    ),
+    TrainConfig(
+        name="pi0_libero_moe_spatial_only",
+        model=pi0_moe_config.Pi0MoEConfig(
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m_lora",
+            moe_layers=[12, 13, 14, 15, 16, 17],
+            moe_config=moe.MoEConfig(num_experts=4, top_k=1, router_z_loss_coeff=1e-3),
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            assets=AssetsConfig(asset_id="libero_spatial"),
+            base_config=DataConfig(
+                prompt_from_task=True,
+                task_names=_LIBERO_SPATIAL_TASKS,
+            ),
             extra_delta_transform=True,
         ),
         weight_loader=moe_weight_loader.MoEWeightLoader(

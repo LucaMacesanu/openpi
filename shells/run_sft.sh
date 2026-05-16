@@ -30,7 +30,7 @@ CUDA_DEVICES=""
 BATCH_SIZE=32
 WANDB_ENABLED=true
 CONFIG_NAME="pi05_libero_sft"
-NORM_STATS_FROM="pi0_libero_low_mem_finetune"
+NORM_STATS_FROM=""
 CHECKPOINT_INTERVAL=""
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.8
 
@@ -65,6 +65,8 @@ if [[ "$NUM_TASKS" -eq 0 ]]; then
     echo "  --task_seed       N        Seed for task sampling (default: 42)"
     echo "  --cuda_devices    0,1,...  CUDA_VISIBLE_DEVICES value (default: all)"
     echo "  --batch_size      N        Global batch size (default: 32)"
+    echo "  --config_name     NAME     Training config (default: pi05_libero_sft)"
+    echo "  --norm_stats_from NAME     Config for norm stats (default: selected config)"
     echo "  --wandb_enabled        true|false (default: true)"
     echo "  --checkpoint_interval  N        Save intermediate checkpoint every N steps (default: off)"
     exit 1
@@ -82,8 +84,11 @@ CMD=(
     --checkpoint_dir "$CHECKPOINT_DIR"
     --batch_size     "$BATCH_SIZE"
     --config_name    "$CONFIG_NAME"
-    --norm_stats_from "$NORM_STATS_FROM"
 )
+
+if [[ -n "$NORM_STATS_FROM" ]]; then
+    CMD+=(--norm_stats_from "$NORM_STATS_FROM")
+fi
 
 if [[ "$WANDB_ENABLED" == "true" ]]; then
     CMD+=(--wandb_enabled)
@@ -100,6 +105,7 @@ echo "SFT Run Scheduler"
 echo "  Experiment  : $EXP_NAME"
 echo "  Tasks       : $NUM_TASKS (task_seed=$TASK_SEED)"
 echo "  Config      : $CONFIG_NAME"
+echo "  Norm stats  : ${NORM_STATS_FROM:-$CONFIG_NAME}"
 echo "  Steps/task  : $STEPS_PER_TASK"
 echo "  Checkpoint  : $CHECKPOINT_DIR/$EXP_NAME"
 if [[ -n "$CHECKPOINT_INTERVAL" ]]; then

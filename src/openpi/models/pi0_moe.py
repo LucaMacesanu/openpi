@@ -46,12 +46,14 @@ class Pi0MoE(_model.BaseModel):
 
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
+        moe_layers = config.resolve_moe_layers(action_expert_config.depth)
 
         llm = nnx_bridge.ToNNX(
             moe.MoEModule(
                 configs=[paligemma_config, action_expert_config],
                 embed_dtype=config.dtype,
                 moe_config=config.moe_config,
+                moe_layers=moe_layers,
                 adarms=False,
             )
         )

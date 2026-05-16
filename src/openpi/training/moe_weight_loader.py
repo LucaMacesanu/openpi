@@ -5,6 +5,8 @@ Fan-out strategy
 For every key of the form  ...layers/mlp_1/<leaf>  in the base checkpoint
 (e.g. ``gating_einsum``, ``linear``), N copies are written to
 ...layers/mlp_1/expert_k/<leaf>  (k = 0 … N-1).
+When the target model also has the original dense key, it is restored there as
+well so layer-wise MoE can fall back to the dense FFN on inactive layers.
 
 All experts start identical to the original dense action expert, so the model's
 initial behaviour matches the corresponding dense pi0/pi0.5 checkpoint. The router kernel and all LoRA
@@ -59,11 +61,15 @@ class MoEWeightLoader(weight_loaders.WeightLoader):
 
         # Pattern: a top-level mlp_1 parameter, i.e. the path ends in
         # .../mlp_1/<leaf_name>  with no further "/" inside <leaf_name>.
+        # These are restored to the dense path and fanned out to experts.
         mlp1_leaf_re = re.compile(r"(.*)/mlp_1/([^/]+)$")
 
         for k, v in flat_base.items():
             m = mlp1_leaf_re.match(k)
             if m:
+                if k in flat_model:
+                    tgt_dtype = flat_model[k].dtype
+                    result[k] = v.astype(tgt_dtype) if v.dtype != tgt_dtype else v
                 # Fan out to each expert sub-module.
                 prefix, leaf = m.group(1), m.group(2)
                 for ek in range(self.num_experts):

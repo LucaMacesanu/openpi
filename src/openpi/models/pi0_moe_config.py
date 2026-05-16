@@ -28,11 +28,26 @@ class Pi0MoEConfig(Pi0Config):
 
     pi05: bool = False
     moe_config: moe.MoEConfig = dataclasses.field(default_factory=moe.MoEConfig)
+    moe_layers: list[int] | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "pi05", False)
         object.__setattr__(self, "discrete_state_input", False)
         super().__post_init__()
+
+    def resolve_moe_layers(self, depth: int) -> tuple[int, ...]:
+        """Returns the transformer layers that should use the MoE FFN."""
+        if self.moe_layers is None:
+            return tuple(range(depth))
+
+        if len(set(self.moe_layers)) != len(self.moe_layers):
+            raise ValueError(f"moe_layers must not contain duplicates: {self.moe_layers}")
+
+        invalid_layers = [layer for layer in self.moe_layers if layer < 0 or layer >= depth]
+        if invalid_layers:
+            raise ValueError(f"moe_layers must be between 0 and {depth - 1}: {invalid_layers}")
+
+        return tuple(self.moe_layers)
 
     @override
     def create(self, rng: at.KeyArrayLike) -> Pi0MoE:
