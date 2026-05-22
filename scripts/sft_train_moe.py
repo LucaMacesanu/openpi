@@ -24,6 +24,7 @@ import openpi.training.checkpoints as _checkpoints
 import openpi.training.config as _config
 import openpi.training.sharding as sharding
 import openpi.training.utils as training_utils
+import openpi.training.weight_loaders as weight_loaders
 
 try:
     from scripts import sft_train as base_sft
@@ -38,6 +39,10 @@ class MoESFTArgs(base_sft.SFTArgs):
     # Optional override for model.moe_config.load_balance_loss_weight.
     # Set to 0.0 to disable the MoE / residual-MoE load-balancing loss.
     load_balance_loss_weight: float | None = None
+
+    # Optional checkpoint params path used to initialize the first sequential SFT task.
+    # Example: /path/to/openpi_ckpts/config/exp/29999/params
+    initial_checkpoint_params: str | None = None
 
 
 def _format_scalar_metrics(metrics: dict[str, object]) -> str:
@@ -75,6 +80,12 @@ def main(args: MoESFTArgs) -> None:
         # Match sft_train.py: use another config name only to locate norm stats.
         base_config = dataclasses.replace(base_config, name=args.norm_stats_from)
     base_config = _override_load_balance_loss_weight(base_config, args.load_balance_loss_weight)
+    if args.initial_checkpoint_params is not None:
+        base_config = dataclasses.replace(
+            base_config,
+            weight_loader=weight_loaders.CheckpointWeightLoader(args.initial_checkpoint_params),
+        )
+        logging.info(f"Initializing SFT from checkpoint params: {args.initial_checkpoint_params}")
     if args.load_balance_loss_weight is not None:
         logging.info(f"Overriding MoE load_balance_loss_weight={args.load_balance_loss_weight}")
     repo_id = base_config.data.repo_id

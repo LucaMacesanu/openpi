@@ -1,0 +1,4 @@
+# Remaining 3 Libero Object tasks for sequential MoE SFT.
+pick up the orange juice and place it in the basket
+pick up the salad dressing and place it in the basket
+pick up the tomato sauce and place it in the basket

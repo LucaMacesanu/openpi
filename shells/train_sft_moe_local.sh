@@ -12,7 +12,8 @@
 #       --norm_stats_from pi0_libero_residual_moe_spatial_only \
 #       --checkpoint_dir /scratch/tz2668/openpi/checkpoints/sft_checkpoints \
 #       --batch_size 64 \
-#       --resume true
+#       --resume true \
+#       --initial_checkpoint_params /path/to/joint_ckpt/29999/params
 
 set -euo pipefail
 
@@ -31,6 +32,7 @@ NORM_STATS_FROM=""
 CHECKPOINT_INTERVAL=""
 RESUME=false
 LOAD_BALANCE_LOSS_WEIGHT=""
+INITIAL_CHECKPOINT_PARAMS=""
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.8
 
 # ---------------------------------------------------------------------------
@@ -50,6 +52,7 @@ while [[ $# -gt 0 ]]; do
         --checkpoint_interval) CHECKPOINT_INTERVAL="$2";  shift 2 ;;
         --resume)              RESUME="$2";               shift 2 ;;
         --load_balance_loss_weight) LOAD_BALANCE_LOSS_WEIGHT="$2"; shift 2 ;;
+        --initial_checkpoint_params) INITIAL_CHECKPOINT_PARAMS="$2"; shift 2 ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
 done
@@ -70,6 +73,7 @@ if [[ -z "$TASKS_FILES" ]]; then
     echo "  --checkpoint_interval N            Save intermediate checkpoint every N steps"
     echo "  --resume          true|false       Resume from last completed/partial checkpoint (default: false)"
     echo "  --load_balance_loss_weight W       Override MoE LBL weight; set 0 to disable"
+    echo "  --initial_checkpoint_params PATH   Initialize first SFT task from checkpoint params"
     exit 1
 fi
 
@@ -126,6 +130,10 @@ if [[ -n "$LOAD_BALANCE_LOSS_WEIGHT" ]]; then
     CMD+=(--load_balance_loss_weight "$LOAD_BALANCE_LOSS_WEIGHT")
 fi
 
+if [[ -n "$INITIAL_CHECKPOINT_PARAMS" ]]; then
+    CMD+=(--initial_checkpoint_params "$INITIAL_CHECKPOINT_PARAMS")
+fi
+
 if [[ "$RESUME" == "true" ]]; then
     CMD+=(--resume)
 else
@@ -152,6 +160,9 @@ if [[ -n "$CHECKPOINT_INTERVAL" ]]; then
 fi
 if [[ -n "$LOAD_BALANCE_LOSS_WEIGHT" ]]; then
     echo "  LBL weight   : $LOAD_BALANCE_LOSS_WEIGHT"
+fi
+if [[ -n "$INITIAL_CHECKPOINT_PARAMS" ]]; then
+    echo "  Init params  : $INITIAL_CHECKPOINT_PARAMS"
 fi
 echo "  Resume      : $RESUME"
 if [[ -n "$CUDA_DEVICES" ]]; then

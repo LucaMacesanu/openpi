@@ -1,0 +1,4 @@
+# Remaining 3 Libero Spatial tasks for sequential MoE SFT.
+pick up the black bowl on the stove and place it on the plate
+pick up the black bowl next to the plate and place it on the plate
+pick up the black bowl on the wooden cabinet and place it on the plate

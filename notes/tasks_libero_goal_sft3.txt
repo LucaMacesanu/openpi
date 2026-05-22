@@ -1,0 +1,4 @@
+# Remaining 3 Libero Goal tasks for sequential MoE SFT.
+turn on the stove
+put the bowl on the plate
+put the wine bottle on the rack

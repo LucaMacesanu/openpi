@@ -577,6 +577,52 @@ _LIBERO_SPATIAL_TASKS = (
     "pick up the black bowl on the wooden cabinet and place it on the plate",
 )
 
+_LIBERO_OBJECT_TASKS = (
+    "pick up the alphabet soup and place it in the basket",
+    "pick up the bbq sauce and place it in the basket",
+    "pick up the butter and place it in the basket",
+    "pick up the chocolate pudding and place it in the basket",
+    "pick up the cream cheese and place it in the basket",
+    "pick up the ketchup and place it in the basket",
+    "pick up the milk and place it in the basket",
+    "pick up the orange juice and place it in the basket",
+    "pick up the salad dressing and place it in the basket",
+    "pick up the tomato sauce and place it in the basket",
+)
+
+_LIBERO_GOAL_TASKS = (
+    "open the middle drawer of the cabinet",
+    "put the bowl on the stove",
+    "put the wine bottle on top of the cabinet",
+    "open the top drawer and put the bowl inside",
+    "put the bowl on top of the cabinet",
+    "push the plate to the front of the stove",
+    "put the cream cheese in the bowl",
+    "turn on the stove",
+    "put the bowl on the plate",
+    "put the wine bottle on the rack",
+)
+
+_LIBERO_10_TASKS = (
+    "pick up the book and place it in the back compartment of the caddy",
+    "put both moka pots on the stove",
+    "put both the alphabet soup and the cream cheese box in the basket",
+    "put both the alphabet soup and the tomato sauce in the basket",
+    "put both the cream cheese box and the butter in the basket",
+    "put the black bowl in the bottom drawer of the cabinet and close it",
+    "put the white mug on the left plate and put the yellow and white mug on the right plate",
+    "put the white mug on the plate and put the chocolate pudding to the right of the plate",
+    "put the yellow and white mug in the microwave and close it",
+    "turn on the stove and put the moka pot on it",
+)
+
+_LIBERO_28_JOINT_TRAIN_TASKS = (
+    *_LIBERO_10_TASKS[:7],
+    *_LIBERO_GOAL_TASKS[:7],
+    *_LIBERO_OBJECT_TASKS[:7],
+    *_LIBERO_SPATIAL_TASKS[:7],
+)
+
 
 # Use `get_config` if you need to get a config by name in your code.
 _CONFIGS = [
@@ -1242,6 +1288,38 @@ _CONFIGS = [
         data=LeRobotLiberoDataConfig(
             repo_id="physical-intelligence/libero",
             base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        weight_loader=moe_weight_loader.ResidualMoEWeightLoader(
+            base_loader=weight_loaders.CheckpointWeightLoader(
+                "gs://openpi-assets/checkpoints/pi0_base/params"
+            )
+        ),
+        freeze_filter=pi0_residual_moe_config.Pi0ResidualMoEConfig().get_freeze_filter(),
+        num_train_steps=30_000,
+    ),
+    TrainConfig(
+        name="pi0_libero_residual_moe_28_train",
+        model=pi0_residual_moe_config.Pi0ResidualMoEConfig(
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m_lora",
+            moe_layers=[12, 13, 14, 15, 16, 17],
+            moe_config=moe.ResidualMoEConfig(
+                num_experts=8,
+                top_k=1,
+                router_z_loss_coeff=1e-3,
+                load_balance_loss_weight=1e-3,
+                expert_hidden_dim=128,
+                residual_scale=1.0,
+            ),
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            assets=AssetsConfig(asset_id="libero_28_joint_train"),
+            base_config=DataConfig(
+                prompt_from_task=True,
+                task_names=_LIBERO_28_JOINT_TRAIN_TASKS,
+            ),
             extra_delta_transform=True,
         ),
         weight_loader=moe_weight_loader.ResidualMoEWeightLoader(

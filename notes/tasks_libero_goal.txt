@@ -1,0 +1,13 @@
+# Libero Goal tasks in canonical order (from notes/canonical_task_order.txt).
+# One task per line. Lines starting with # are ignored by SFT wrappers.
+# Task names are lowercase without trailing periods to match the LeRobot dataset.
+open the middle drawer of the cabinet
+put the bowl on the stove
+put the wine bottle on top of the cabinet
+open the top drawer and put the bowl inside
+put the bowl on top of the cabinet
+push the plate to the front of the stove
+put the cream cheese in the bowl
+turn on the stove
+put the bowl on the plate
+put the wine bottle on the rack
