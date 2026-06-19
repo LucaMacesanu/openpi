@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import flax.nnx as nnx
 from typing_extensions import override
@@ -23,7 +23,7 @@ class Pi0ResidualMoEConfig(Pi0Config):
 
     pi05: bool = False
     moe_config: moe.ResidualMoEConfig = dataclasses.field(default_factory=moe.ResidualMoEConfig)
-    moe_layers: list[int] | None = None
+    moe_layers: list[int] | Literal["All"] | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "pi05", False)
@@ -33,6 +33,8 @@ class Pi0ResidualMoEConfig(Pi0Config):
     def resolve_moe_layers(self, depth: int) -> tuple[int, ...]:
         """Returns the transformer layers that should use the residual MoE FFN."""
         if self.moe_layers is None:
+            return ()
+        if self.moe_layers == "All":
             return tuple(range(depth))
 
         if len(set(self.moe_layers)) != len(self.moe_layers):

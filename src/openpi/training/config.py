@@ -1227,7 +1227,7 @@ _CONFIGS = [
         model=pi0_moe_config.Pi0MoEConfig(
             paligemma_variant="gemma_2b",
             action_expert_variant="gemma_300m_lora",
-            moe_layers=[12, 13, 14, 15, 16, 17],
+            moe_layers="All",
             moe_config=moe.MoEConfig(num_experts=4, top_k=1, router_z_loss_coeff=1e-3),
         ),
         data=LeRobotLiberoDataConfig(

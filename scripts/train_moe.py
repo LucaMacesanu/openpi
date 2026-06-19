@@ -64,6 +64,8 @@ def _flatten_moe_metrics(
 
     if active_layer_indices is None:
         active_layer_indices = list(range(expert_usage.shape[0]))
+    elif active_layer_indices == "All":
+        active_layer_indices = list(range(expert_usage.shape[0]))
 
     for metric_idx, layer_idx in enumerate(active_layer_indices):
         info[f"moe_layers/layer_{layer_idx}/expert_usage"] = expert_usage[metric_idx]

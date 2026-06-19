@@ -18,6 +18,12 @@ def test_pi0_moe_config_defaults():
     assert config.pi05 is False
     assert config.discrete_state_input is False
     assert config.moe_layers is None
+    assert config.resolve_moe_layers(4) == ()
+
+
+def test_pi0_moe_all_layers_sentinel():
+    config = pi0_moe_config.Pi0MoEConfig(moe_layers="All")
+    assert config.resolve_moe_layers(4) == (0, 1, 2, 3)
 
 
 def test_pi05_moe_config_defaults():
@@ -31,8 +37,14 @@ def test_pi0_residual_moe_config_defaults():
     assert config.pi05 is False
     assert config.discrete_state_input is False
     assert config.moe_layers is None
+    assert config.resolve_moe_layers(4) == ()
     assert config.moe_config.top_k == 1
     assert config.moe_config.num_experts == 8
+
+
+def test_pi0_residual_moe_all_layers_sentinel():
+    config = pi0_residual_moe_config.Pi0ResidualMoEConfig(moe_layers="All")
+    assert config.resolve_moe_layers(4) == (0, 1, 2, 3)
 
 
 def test_pi0_moe_model_dummy():

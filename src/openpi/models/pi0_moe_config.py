@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import flax.nnx as nnx
 from typing_extensions import override
@@ -28,7 +28,7 @@ class Pi0MoEConfig(Pi0Config):
 
     pi05: bool = False
     moe_config: moe.MoEConfig = dataclasses.field(default_factory=moe.MoEConfig)
-    moe_layers: list[int] | None = None
+    moe_layers: list[int] | Literal["All"] | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "pi05", False)
@@ -38,6 +38,8 @@ class Pi0MoEConfig(Pi0Config):
     def resolve_moe_layers(self, depth: int) -> tuple[int, ...]:
         """Returns the transformer layers that should use the MoE FFN."""
         if self.moe_layers is None:
+            return ()
+        if self.moe_layers == "All":
             return tuple(range(depth))
 
         if len(set(self.moe_layers)) != len(self.moe_layers):

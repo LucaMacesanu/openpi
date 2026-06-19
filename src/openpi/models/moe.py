@@ -586,10 +586,7 @@ class MoEModule(nn.Module):
             static_argnums=(6,),
             policy=jax.checkpoint_policies.nothing_saveable,
         )
-        if self.moe_layers is None:
-            self._active_moe_layers = tuple(range(self.configs[0].depth))
-        else:
-            self._active_moe_layers = tuple(self.moe_layers)
+        self._active_moe_layers = () if self.moe_layers is None else tuple(self.moe_layers)
         self._moe_layer_mask = tuple(layer in self._active_moe_layers for layer in range(self.configs[0].depth))
         self.layers = nn.scan(
             block_cls,
@@ -704,10 +701,7 @@ class ResidualMoEModule(nn.Module):
             static_argnums=(6,),
             policy=jax.checkpoint_policies.nothing_saveable,
         )
-        if self.moe_layers is None:
-            self._active_moe_layers = tuple(range(self.configs[0].depth))
-        else:
-            self._active_moe_layers = tuple(self.moe_layers)
+        self._active_moe_layers = () if self.moe_layers is None else tuple(self.moe_layers)
         self._moe_layer_mask = tuple(layer in self._active_moe_layers for layer in range(self.configs[0].depth))
         self.layers = nn.scan(
             block_cls,
