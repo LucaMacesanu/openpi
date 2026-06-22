@@ -9,6 +9,7 @@ import openpi.models.pi0_moe_config as pi0_moe_config
 import openpi.models.pi0_residual_moe_config as pi0_residual_moe_config
 import openpi.models.pi05_moe_config as pi05_moe_config
 import openpi.shared.nnx_utils as nnx_utils
+import openpi.training.config as training_config
 import openpi.training.moe_weight_loader as moe_weight_loader
 import openpi.training.weight_loaders as weight_loaders
 
@@ -24,6 +25,33 @@ def test_pi0_moe_config_defaults():
 def test_pi0_moe_all_layers_sentinel():
     config = pi0_moe_config.Pi0MoEConfig(moe_layers="All")
     assert config.resolve_moe_layers(4) == (0, 1, 2, 3)
+
+
+def test_moe_feedforward_full_experts_use_nonzero_router_init():
+    config = moe.MoEConfig(num_experts=4, top_k=1, router_init_std=1e-3)
+    module = moe.MoEFeedForward(features=8, hidden_dim=16, moe_config=config)
+    params = module.init(jax.random.key(0), jnp.ones((2, 3, 8), dtype=jnp.float32))["params"]
+
+    assert "gating_einsum_lora_a" not in params["expert_0"]
+    assert params["expert_0"]["gating_einsum"].shape == (2, 8, 16)
+    assert params["expert_0"]["linear"].shape == (16, 8)
+    assert params["router"]["kernel"].shape == (8, 4)
+    assert not np.allclose(np.asarray(params["router"]["kernel"]), 0.0)
+
+
+def test_pi0_libero_moe_configs_use_full_ffn_experts():
+    configs = {config.name: config for config in training_config._CONFIGS}  # noqa: SLF001
+    for name in ("pi0_libero_moe", "pi0_libero_moe_spatial_only"):
+        config = configs[name]
+        model_config = config.model
+
+        assert isinstance(model_config, pi0_moe_config.Pi0MoEConfig)
+        assert model_config.action_expert_variant == "gemma_300m"
+        assert model_config.moe_config.top_k == 1
+        assert model_config.moe_config.router_z_loss_coeff == 0.0
+        assert model_config.moe_config.load_balance_loss_weight == 0.0
+        assert model_config.moe_config.router_init_std == 1e-3
+        assert isinstance(config.freeze_filter, nnx.Nothing)
 
 
 def test_pi05_moe_config_defaults():
@@ -158,6 +186,7 @@ def test_pi0_residual_moe_model_dummy():
     config = pi0_residual_moe_config.Pi0ResidualMoEConfig(
         paligemma_variant="dummy",
         action_expert_variant="dummy",
+        moe_layers="All",
         moe_config=moe.ResidualMoEConfig(num_experts=2, expert_hidden_dim=16, residual_scale=1.0),
     )
     model = config.create(key)

@@ -9,9 +9,8 @@ When the target model also has the original dense key, it is restored there as
 well so layer-wise MoE can fall back to the dense FFN on inactive layers.
 
 All experts start identical to the original dense action expert, so the model's
-initial behaviour matches the corresponding dense pi0/pi0.5 checkpoint. The router kernel and all LoRA
-weights start at zero (taken from the model's randomly-initialised
-reference params).
+initial behavior matches the corresponding dense pi0/pi0.5 checkpoint except
+for the model-initialized router and any optional LoRA weights.
 
 Usage
 -----
@@ -84,8 +83,8 @@ class MoEWeightLoader(weight_loaders.WeightLoader):
 
         # Fill every key not yet in result from the model's reference params.
         # This covers:
-        #   - mlp_1/router/kernel          (zeros from model init)
-        #   - mlp_1/expert_k/lora_*        (zeros from model init)
+        #   - mlp_1/router/kernel          (from model init)
+        #   - mlp_1/expert_k/lora_*        (from model init, if LoRA is enabled)
         #   - pi05: action_in_proj / time_mlp_*          (random from model init)
         #   - pi0:  action_in_proj / state_proj / action_time_mlp_*  (random from model init)
         for k, v in flat_model.items():
@@ -110,4 +109,4 @@ class ResidualMoEWeightLoader(weight_loaders.WeightLoader):
             download.maybe_download(self.base_loader.params_path),
             restore_type=np.ndarray,
         )
-        return weight_loaders._merge_params(base_params, params, missing_regex=".*")
+        return weight_loaders._merge_params(base_params, params, missing_regex=".*")  # noqa: SLF001

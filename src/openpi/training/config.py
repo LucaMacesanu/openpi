@@ -16,24 +16,24 @@ import tyro
 import openpi.models.model as _model
 import openpi.models.moe as moe
 import openpi.models.pi0_config as pi0_config
-import openpi.models.pi05_moe_config as pi05_moe_config
+import openpi.models.pi0_fast as pi0_fast
 import openpi.models.pi0_moe_config as pi0_moe_config
 import openpi.models.pi0_residual_moe_config as pi0_residual_moe_config
-import openpi.training.moe_weight_loader as moe_weight_loader
-import openpi.models.pi0_fast as pi0_fast
+import openpi.models.pi05_moe_config as pi05_moe_config
 import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
+import openpi.shared.nnx_utils as nnx_utils
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
 import openpi.training.misc.polaris_config as polaris_config
 import openpi.training.misc.roboarena_config as roboarena_config
+import openpi.training.moe_weight_loader as moe_weight_loader
 import openpi.training.optimizer as _optimizer
 import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as _transforms
-import openpi.shared.nnx_utils as nnx_utils
 
 ModelType: TypeAlias = _model.ModelType
 # Work around a tyro issue with using nnx.filterlib.Filter directly.
@@ -1226,9 +1226,15 @@ _CONFIGS = [
         name="pi0_libero_moe",
         model=pi0_moe_config.Pi0MoEConfig(
             paligemma_variant="gemma_2b",
-            action_expert_variant="gemma_300m_lora",
+            action_expert_variant="gemma_300m",
             moe_layers="All",
-            moe_config=moe.MoEConfig(num_experts=4, top_k=1, router_z_loss_coeff=1e-3),
+            moe_config=moe.MoEConfig(
+                num_experts=4,
+                top_k=1,
+                router_z_loss_coeff=0.0,
+                load_balance_loss_weight=0.0,
+                router_init_std=1e-3,
+            ),
         ),
         data=LeRobotLiberoDataConfig(
             repo_id="physical-intelligence/libero",
@@ -1241,16 +1247,22 @@ _CONFIGS = [
             ),
             num_experts=4,
         ),
-        freeze_filter=pi0_moe_config.Pi0MoEConfig().get_freeze_filter(),
+        freeze_filter=nnx.Nothing(),
         num_train_steps=30_000,
     ),
     TrainConfig(
         name="pi0_libero_moe_spatial_only",
         model=pi0_moe_config.Pi0MoEConfig(
             paligemma_variant="gemma_2b",
-            action_expert_variant="gemma_300m_lora",
+            action_expert_variant="gemma_300m",
             moe_layers=[12, 13, 14, 15, 16, 17],
-            moe_config=moe.MoEConfig(num_experts=4, top_k=1, router_z_loss_coeff=1e-3),
+            moe_config=moe.MoEConfig(
+                num_experts=4,
+                top_k=1,
+                router_z_loss_coeff=0.0,
+                load_balance_loss_weight=0.0,
+                router_init_std=1e-3,
+            ),
         ),
         data=LeRobotLiberoDataConfig(
             repo_id="physical-intelligence/libero",
@@ -1267,7 +1279,7 @@ _CONFIGS = [
             ),
             num_experts=4,
         ),
-        freeze_filter=pi0_moe_config.Pi0MoEConfig().get_freeze_filter(),
+        freeze_filter=nnx.Nothing(),
         num_train_steps=30_000,
     ),
     TrainConfig(

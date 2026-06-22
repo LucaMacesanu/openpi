@@ -44,6 +44,7 @@ class MoEConfig:
     top_k: int = 1
     router_z_loss_coeff: float = 1e-3
     load_balance_loss_weight: float = 1e-3
+    router_init_std: float = 1e-3
 
 
 @dataclasses.dataclass(frozen=True)
@@ -206,11 +207,11 @@ class MoEFeedForward(nn.Module):
                     lora_config=self.lora_config,
                 ),
             )
-        # Router: zero-initialized so initial routing is uniform.
+        # Non-zero init avoids deterministic expert-0 tie-breaking under hard top-1 routing.
         self.router = nn.Dense(
             self.moe_config.num_experts,
             use_bias=False,
-            kernel_init=nn.initializers.zeros,
+            kernel_init=nn.initializers.normal(stddev=self.moe_config.router_init_std),
         )
 
     def __call__(self, x, *, moe_enabled: bool | at.Bool[at.Array, ""] = True):
