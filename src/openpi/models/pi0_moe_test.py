@@ -54,6 +54,27 @@ def test_pi0_libero_moe_configs_use_full_ffn_experts():
         assert isinstance(config.freeze_filter, nnx.Nothing)
 
 
+def test_pi0_libero_residual_moe_configs_use_trainable_dense_ffn():
+    configs = {config.name: config for config in training_config._CONFIGS}  # noqa: SLF001
+    for name in (
+        "pi0_libero_residual_moe",
+        "pi0_libero_residual_moe_28_train",
+        "pi0_libero_residual_moe_spatial_only",
+    ):
+        config = configs[name]
+        model_config = config.model
+
+        assert isinstance(model_config, pi0_residual_moe_config.Pi0ResidualMoEConfig)
+        assert model_config.action_expert_variant == "gemma_300m"
+        assert model_config.moe_config.top_k == 1
+        assert model_config.moe_config.router_z_loss_coeff == 0.0
+        assert model_config.moe_config.load_balance_loss_weight == 0.0
+        assert model_config.moe_config.expert_hidden_dim == 128
+        assert model_config.moe_config.residual_linear_init_std == 1e-4
+        assert model_config.moe_config.router_init_std == 1e-3
+        assert isinstance(config.freeze_filter, nnx.Nothing)
+
+
 def test_pi05_moe_config_defaults():
     config = pi05_moe_config.Pi05MoEConfig()
     assert config.pi05 is True

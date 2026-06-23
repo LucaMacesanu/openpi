@@ -1227,7 +1227,8 @@ _CONFIGS = [
         model=pi0_moe_config.Pi0MoEConfig(
             paligemma_variant="gemma_2b",
             action_expert_variant="gemma_300m",
-            moe_layers="All",
+            # moe_layers="All",
+            moe_layers=[12, 13, 14, 15, 16, 17],
             moe_config=moe.MoEConfig(
                 num_experts=4,
                 top_k=1,
@@ -1286,15 +1287,17 @@ _CONFIGS = [
         name="pi0_libero_residual_moe",
         model=pi0_residual_moe_config.Pi0ResidualMoEConfig(
             paligemma_variant="gemma_2b",
-            action_expert_variant="gemma_300m_lora",
+            action_expert_variant="gemma_300m",
             moe_layers=[12, 13, 14, 15, 16, 17],
             moe_config=moe.ResidualMoEConfig(
                 num_experts=8,
                 top_k=1,
-                router_z_loss_coeff=1e-3,
-                load_balance_loss_weight=1e-3,
+                router_z_loss_coeff=0.0,
+                load_balance_loss_weight=0.0,
                 expert_hidden_dim=128,
                 residual_scale=1.0,
+                residual_linear_init_std=1e-4,
+                router_init_std=1e-3,
             ),
         ),
         data=LeRobotLiberoDataConfig(
@@ -1307,22 +1310,24 @@ _CONFIGS = [
                 "gs://openpi-assets/checkpoints/pi0_base/params"
             )
         ),
-        freeze_filter=pi0_residual_moe_config.Pi0ResidualMoEConfig().get_freeze_filter(),
+        freeze_filter=nnx.Nothing(),
         num_train_steps=30_000,
     ),
     TrainConfig(
         name="pi0_libero_residual_moe_28_train",
         model=pi0_residual_moe_config.Pi0ResidualMoEConfig(
             paligemma_variant="gemma_2b",
-            action_expert_variant="gemma_300m_lora",
+            action_expert_variant="gemma_300m",
             moe_layers=[12, 13, 14, 15, 16, 17],
             moe_config=moe.ResidualMoEConfig(
                 num_experts=8,
                 top_k=1,
-                router_z_loss_coeff=1e-3,
-                load_balance_loss_weight=1e-3,
+                router_z_loss_coeff=0.0,
+                load_balance_loss_weight=0.0,
                 expert_hidden_dim=128,
                 residual_scale=1.0,
+                residual_linear_init_std=1e-4,
+                router_init_std=1e-3,
             ),
         ),
         data=LeRobotLiberoDataConfig(
@@ -1339,22 +1344,24 @@ _CONFIGS = [
                 "gs://openpi-assets/checkpoints/pi0_base/params"
             )
         ),
-        freeze_filter=pi0_residual_moe_config.Pi0ResidualMoEConfig().get_freeze_filter(),
+        freeze_filter=nnx.Nothing(),
         num_train_steps=30_000,
     ),
     TrainConfig(
         name="pi0_libero_residual_moe_spatial_only",
         model=pi0_residual_moe_config.Pi0ResidualMoEConfig(
             paligemma_variant="gemma_2b",
-            action_expert_variant="gemma_300m_lora",
+            action_expert_variant="gemma_300m",
             moe_layers=[12, 13, 14, 15, 16, 17],
             moe_config=moe.ResidualMoEConfig(
                 num_experts=8,
                 top_k=1,
-                router_z_loss_coeff=1e-3,
-                load_balance_loss_weight=1e-3,
+                router_z_loss_coeff=0.0,
+                load_balance_loss_weight=0.0,
                 expert_hidden_dim=128,
                 residual_scale=1.0,
+                residual_linear_init_std=1e-4,
+                router_init_std=1e-3,
             ),
         ),
         data=LeRobotLiberoDataConfig(
@@ -1371,7 +1378,7 @@ _CONFIGS = [
                 "gs://openpi-assets/checkpoints/pi0_base/params"
             )
         ),
-        freeze_filter=pi0_residual_moe_config.Pi0ResidualMoEConfig().get_freeze_filter(),
+        freeze_filter=nnx.Nothing(),
         num_train_steps=30_000,
     ),
     TrainConfig(
