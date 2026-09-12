@@ -198,10 +198,33 @@ RetrievalMetric = Literal["vision", "value", "vision_value"]
 
 
 def _topk(scores: np.ndarray, pool: ChunkDictionary, k: int) -> list[Chunk]:
+    """Nearest-to-farthest by score, with an episode-diversity constraint: at most
+    one chunk per episode_index. Pool chunks overlap 50% within an episode
+    (chunk_starts' stride), so DINOv2 embeddings of temporally-adjacent chunks are
+    often nearly identical -- unconstrained top-k for k>1 was observed to collapse
+    onto 2-3 near-duplicate chunks from a single episode, making k=3 behave like
+    k=1 at 3x the context-token cost (see notes/context_encoding_redesign.md).
+    Falls back to allowing repeated episodes only if the pool genuinely has fewer
+    than k distinct episodes -- never raises for that case, only for k > len(pool)
+    as before (every canonical task pool currently has >=5 distinct episodes, so
+    this fallback shouldn't fire at k=3 in practice)."""
     if k > len(pool):
         raise ValueError(f"k={k} exceeds pool size {len(pool)}")
-    order = np.argsort(scores)[:k]
-    return [pool.chunks[i] for i in order]
+    order = np.argsort(scores)
+    selected: list[int] = []
+    seen_episodes: set[int] = set()
+    for i in order:
+        ep = pool.chunks[i].episode_index
+        if ep in seen_episodes:
+            continue
+        selected.append(i)
+        seen_episodes.add(ep)
+        if len(selected) == k:
+            break
+    if len(selected) < k:
+        remaining = [i for i in order if i not in selected]
+        selected.extend(remaining[: k - len(selected)])
+    return [pool.chunks[i] for i in selected]
 
 
 def _vision_distances(query_embedding: np.ndarray, pool: ChunkDictionary) -> np.ndarray:
