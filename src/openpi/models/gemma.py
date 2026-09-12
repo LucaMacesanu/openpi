@@ -124,9 +124,15 @@ class RMSNorm(nn.Module):
             )  # scale by learned parameter in float32 (matches Flax implementation)
             return normed_inputs.astype(dtype), None  # return in original dtype
 
-        # adaptive RMSNorm
+        # adaptive RMSNorm. `cond` is either (b, d) -- one modulation vector per example,
+        # broadcast over the sequence below -- or (b, s, d), already one modulation vector
+        # per token (e.g. training-time RTC's per-action-chunk-position flow timestep,
+        # openpi.models.pi0.Pi0.embed_suffix), in which case nn.Dense broadcasts over the
+        # extra axis on its own and no insert is needed.
         modulation = nn.Dense(x.shape[-1] * 3, kernel_init=nn.initializers.zeros, dtype=dtype)(cond)
-        scale, shift, gate = jnp.split(modulation[:, None, :], 3, axis=-1)
+        if modulation.ndim == 2:
+            modulation = modulation[:, None, :]
+        scale, shift, gate = jnp.split(modulation, 3, axis=-1)
         normed_inputs = normed_inputs * (1 + scale) + shift  # scale and shift in float32
         return normed_inputs.astype(dtype), gate
 
@@ -385,6 +391,10 @@ class Module(nn.Module):
     def embed(self, tokens: at.Int[at.Array, "b t"]) -> at.Float[at.Array, "b t d"]:
         return self.embedder.encode(tokens).astype(self.embed_dtype)
 
+    def decode(self, x: at.Float[at.Array, "b t d"]) -> at.Float[at.Array, "b t v"]:
+        """Tied-embedding LM head (first expert's vocab table only)."""
+        return self.embedder.decode(x)
+
     @at.typecheck
     def __call__(
         self,
@@ -392,7 +402,8 @@ class Module(nn.Module):
         embedded: Sequence[at.Float[at.Array, "b _t _d"] | None],
         positions: at.Int[at.Array, "b t"],
         mask: at.Bool[at.Array, "b t s"],
-        adarms_cond: Sequence[at.Float[at.Array, "b _d"] | None] | None = None,
+        # per-example (b, _d), or per-token (b, _t, _d) -- see RMSNorm's cond.ndim branch.
+        adarms_cond: Sequence[at.Float[at.Array, "b _d"] | at.Float[at.Array, "b _t _d"] | None] | None = None,
         *,
         kv_cache: KVCache | None = None,
         deterministic: bool = True,

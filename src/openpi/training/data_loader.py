@@ -7,7 +7,7 @@ from typing import Literal, Protocol, SupportsIndex, TypeVar
 
 import jax
 import jax.numpy as jnp
-import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
+import lerobot.datasets.lerobot_dataset as lerobot_dataset
 import numpy as np
 import torch
 
@@ -137,16 +137,33 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
-    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, root=data_config.root)
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
+        root=data_config.root,
+        episodes=data_config.episodes,
         delta_timestamps={
             key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
         },
+        # icl-dataset's default tolerance_s=1e-4 is tight enough that pure float-rounding
+        # noise in a handful of episodes' video timestamps (observed: query/loaded frames
+        # 0.0001s apart, right at the boundary) raises FrameTimestampError. 1e-3 is still
+        # ~33x tighter than one frame interval at 30fps, so this doesn't mask real
+        # desync, just float noise at the tolerance edge.
+        tolerance_s=1e-3,
     )
 
     if data_config.prompt_from_task:
-        dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
+        # dataset_meta.tasks used to be a dict[int, str] (task_index -> task string) on
+        # the old lerobot version openpi was pinned to; the current lerobot instead
+        # returns a DataFrame indexed by task string with a `task_index` column.
+        # PromptFromLeRobotTask still wants the old dict[int, str] shape.
+        tasks_by_index = dict(zip(dataset_meta.tasks["task_index"], dataset_meta.tasks.index, strict=True))
+        if data_config.task_prompt_overrides:
+            tasks_by_index = {
+                idx: data_config.task_prompt_overrides.get(task, task) for idx, task in tasks_by_index.items()
+            }
+        dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(tasks_by_index)])
 
     return dataset
 

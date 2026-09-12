@@ -32,6 +32,17 @@ class Pi0Config(_model.BaseModelConfig):
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
 
+    # Training-time RTC (notes/training_time_rtc.md; "Training-Time Action Conditioning
+    # for Efficient Real-Time Chunking", arXiv 2512.05964). When set, Pi0.compute_loss
+    # simulates a per-example "inference delay" d in [0, simulated_delay), pins the first
+    # d action-chunk positions' flow timestep to 1 (i.e. already resolved/committed) and
+    # masks the loss to only the remaining noisy suffix -- teaching the action expert to
+    # act as a conditional denoiser for real-time re-planning. Requires pi05=True: the
+    # per-token adaRMS conditioning this needs only exists on the pi05 action-expert path
+    # (see Pi0.embed_suffix). None (default) is a strict no-op, identical to today's
+    # single-global-timestep behavior.
+    simulated_delay: int | None = None
+
     pytorch_compile_mode: str | None = "max-autotune"
 
     def __post_init__(self):
@@ -46,6 +57,8 @@ class Pi0Config(_model.BaseModelConfig):
                 "max-autotune",
                 "max-autotune-no-cudagraphs",
             ]
+        if self.simulated_delay is not None and not self.pi05:
+            raise ValueError("simulated_delay (training-time RTC) requires pi05=True.")
 
     @property
     @override

@@ -55,6 +55,20 @@ class CheckpointWeightLoader(WeightLoader):
 
 
 @dataclasses.dataclass(frozen=True)
+class VictrCheckpointWeightLoader(CheckpointWeightLoader):
+    """CheckpointWeightLoader, but also lets openpi.models.pi0_victr.Pi0Victr's
+    neighbor_rank_embedding (absent from the pi05_base checkpoint -- it's a new param
+    this architecture adds) fall back to its fresh random init instead of being
+    silently dropped from the merged params (see _merge_params: any key present in the
+    freshly-initialized model but missing from both the checkpoint and missing_regex
+    is dropped entirely, not defaulted -- which would break the params pytree)."""
+
+    def load(self, params: at.Params) -> at.Params:
+        loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
+        return _merge_params(loaded_params, params, missing_regex=".*lora.*|.*neighbor_rank_embedding.*")
+
+
+@dataclasses.dataclass(frozen=True)
 class PaliGemmaWeightLoader(WeightLoader):
     """Loads weights from the official PaliGemma checkpoint.
 

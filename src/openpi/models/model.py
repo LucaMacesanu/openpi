@@ -106,6 +106,59 @@ class Observation(Generic[ArrayT]):
     # Token loss mask (for FAST autoregressive model).
     token_loss_mask: at.Bool[ArrayT, "*b l"] | None = None
 
+    # VICTR retrieval-context fields (openpi.models.pi0_victr.Pi0Victr only; every other
+    # model ignores these and every other config leaves them None, so this is a no-op
+    # everywhere else). One block of `k` retrieved demonstration chunks, farthest-to-nearest,
+    # each with `f` sampled frames from its primary camera and a pre-tokenized "Task/State/
+    # Action" text summary (openpi.policies.yor_retrieval.RetrievalContextInputs builds these
+    # at data-loading time, since retrieval itself is a non-jittable host-side nearest-
+    # neighbor lookup).
+    # Context frames, in [-1, 1] float32, same convention as `images`.
+    context_images: at.Float[ArrayT, "*b k f h w c"] | None = None
+    context_image_masks: at.Bool[ArrayT, "*b k f"] | None = None
+    # Pre-tokenized per-chunk text summary. Uses its own "cl" (context length) axis
+    # symbol, distinct from tokenized_prompt's "l" -- jaxtyping ties same-named axis
+    # symbols to one concrete value across every field in a single typecheck call, and
+    # the context text length (e.g. 64) legitimately differs from the prompt length
+    # (e.g. 200).
+    context_tokens: at.Int[ArrayT, "*b k cl"] | None = None
+    context_tokens_mask: at.Bool[ArrayT, "*b k cl"] | None = None
+
+    # Knowledge Insulation fields (openpi.models.pi0_ki.Pi0Ki only; every other model
+    # ignores these). Pre-tokenized discrete targets for the two auxiliary next-token
+    # CE losses that keep training the PaliGemma backbone while the flow-matching loss
+    # is insulated from it (openpi.policies.yor_ki.KiTargetInputs builds these at
+    # data-loading time: FAST-tokenizing actions and looking up subtask text are both
+    # non-jittable host-side work).
+    # [bos, "Action: ", <FAST-tokenized action chunk>, "|"], remapped into PaliGemma vocab.
+    # Own "fl" axis symbol (see context_tokens' comment above -- this length, e.g. 256,
+    # differs from both the prompt length and the subtask-text length below).
+    fast_action_tokens: at.Int[ArrayT, "*b fl"] | None = None
+    fast_action_tokens_mask: at.Bool[ArrayT, "*b fl"] | None = None
+    # Current subtask's text (gap-backfilled VLM annotation), tokenized with the plain
+    # PaliGemma tokenizer. Own "sl" axis symbol, same reasoning.
+    subtask_tokens: at.Int[ArrayT, "*b sl"] | None = None
+    subtask_tokens_mask: at.Bool[ArrayT, "*b sl"] | None = None
+
+    # Reward-Aligned Behavior Cloning per-item loss weight (notes/reward_aligned_bc.md,
+    # openpi.policies.yor_rabc.RabcWeightInputs). Only read by scripts/train.py's
+    # loss_fn when present; every model ignores it, same no-op-everywhere-else pattern
+    # as context_images/subtask_tokens above.
+    rabc_weight: at.Float[ArrayT, "*b"] | None = None
+
+    # RICL-style action-interpolation fields (openpi.models.pi0_fast_victr.Pi0FastVictr
+    # only, when its use_action_interpolation config flag is set; see
+    # notes/action_interpolation.md). Reproduces arXiv:2508.02062's discrete blend of
+    # the model's own predicted action-token distribution with the top-1 retrieved
+    # chunk's actual FAST action tokens, weighted by vision-similarity.
+    # exp(-lamda * normalized top-1 vision distance), one scalar per example.
+    exp_lamda_distance: at.Float[ArrayT, "*b"] | None = None
+    # The nearest retrieved chunk's own actions, tokenized with the same
+    # FASTTokenizer.tokenize_action_only convention as the query -- own "nl" axis
+    # symbol, same reasoning as context_tokens/fast_action_tokens above.
+    nearest_action_tokens: at.Int[ArrayT, "*b nl"] | None = None
+    nearest_action_tokens_mask: at.Bool[ArrayT, "*b nl"] | None = None
+
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":
         """This method defines the mapping between unstructured data (i.e., nested dict) to the structured Observation format."""
@@ -118,6 +171,9 @@ class Observation(Generic[ArrayT]):
                 data["image"][key] = data["image"][key].astype(np.float32) / 255.0 * 2.0 - 1.0
             elif hasattr(data["image"][key], "dtype") and data["image"][key].dtype == torch.uint8:
                 data["image"][key] = data["image"][key].to(torch.float32).permute(0, 3, 1, 2) / 255.0 * 2.0 - 1.0
+        context_images = data.get("context_images")
+        if context_images is not None and context_images.dtype == np.uint8:
+            context_images = context_images.astype(np.float32) / 255.0 * 2.0 - 1.0
         return cls(
             images=data["image"],
             image_masks=data["image_mask"],
@@ -126,6 +182,18 @@ class Observation(Generic[ArrayT]):
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
             token_ar_mask=data.get("token_ar_mask"),
             token_loss_mask=data.get("token_loss_mask"),
+            context_images=context_images,
+            context_image_masks=data.get("context_image_masks"),
+            context_tokens=data.get("context_tokens"),
+            context_tokens_mask=data.get("context_tokens_mask"),
+            fast_action_tokens=data.get("fast_action_tokens"),
+            fast_action_tokens_mask=data.get("fast_action_tokens_mask"),
+            subtask_tokens=data.get("subtask_tokens"),
+            subtask_tokens_mask=data.get("subtask_tokens_mask"),
+            rabc_weight=data.get("rabc_weight"),
+            exp_lamda_distance=data.get("exp_lamda_distance"),
+            nearest_action_tokens=data.get("nearest_action_tokens"),
+            nearest_action_tokens_mask=data.get("nearest_action_tokens_mask"),
         )
 
     def to_dict(self) -> at.PyTree[ArrayT]:
@@ -205,6 +273,23 @@ def preprocess_observation(
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,
         token_loss_mask=observation.token_loss_mask,
+        # Passed through unmodified: retrieved context frames are historical reference
+        # frames, not the live observation, so the augmentation/resize above (crop,
+        # rotate, color jitter) intentionally does not apply to them.
+        context_images=observation.context_images,
+        context_image_masks=observation.context_image_masks,
+        context_tokens=observation.context_tokens,
+        context_tokens_mask=observation.context_tokens_mask,
+        # Passed through unmodified: discrete-loss targets, not something augmentation
+        # touches.
+        fast_action_tokens=observation.fast_action_tokens,
+        fast_action_tokens_mask=observation.fast_action_tokens_mask,
+        subtask_tokens=observation.subtask_tokens,
+        subtask_tokens_mask=observation.subtask_tokens_mask,
+        # Passed through unmodified: same reasoning as fast_action_tokens above.
+        exp_lamda_distance=observation.exp_lamda_distance,
+        nearest_action_tokens=observation.nearest_action_tokens,
+        nearest_action_tokens_mask=observation.nearest_action_tokens_mask,
     )
 
 

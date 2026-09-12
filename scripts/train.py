@@ -2,6 +2,7 @@ import dataclasses
 import functools
 import logging
 import platform
+import time
 from typing import Any
 
 import etils.epath as epath
@@ -26,6 +27,10 @@ import openpi.training.optimizer as _optimizer
 import openpi.training.sharding as sharding
 import openpi.training.utils as training_utils
 import openpi.training.weight_loaders as _weight_loaders
+
+# Matches the SARM paper's epsilon (Sec 3.2, Eq. 7) -- avoids a division by zero if an
+# entire batch's RA-BC weights happen to be 0.
+RABC_EPSILON = 1e-6
 
 
 def init_logging():
@@ -142,13 +147,21 @@ def train_step(
 ) -> tuple[training_utils.TrainState, dict[str, at.Array]]:
     model = nnx.merge(state.model_def, state.params)
     model.train()
+    lr_schedule = config.lr_schedule.create()
 
     @at.typecheck
     def loss_fn(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
         chunked_loss = model.compute_loss(rng, observation, actions, train=True)
-        return jnp.mean(chunked_loss)
+        per_item_loss = jnp.mean(chunked_loss, axis=-1)
+        if observation.rabc_weight is not None:
+            # Reward-Aligned Behavior Cloning (notes/reward_aligned_bc.md, Eq. 7):
+            # weighted mean instead of a plain mean, weight precomputed offline by
+            # scripts/precompute_rabc_weights.py and looked up per-item by
+            # openpi.policies.yor_rabc.RabcWeightInputs.
+            return jnp.sum(observation.rabc_weight * per_item_loss) / (jnp.sum(observation.rabc_weight) + RABC_EPSILON)
+        return jnp.mean(per_item_loss)
 
     train_rng = jax.random.fold_in(rng, state.step)
     observation, actions = batch
@@ -187,6 +200,12 @@ def train_step(
         "loss": loss,
         "grad_norm": optax.global_norm(grads),
         "param_norm": optax.global_norm(kernel_params),
+        "update_norm": optax.global_norm(updates),
+        # Actual LR applied at this step (state.step, pre-increment, matches the
+        # count optax's own ScaleBySchedule tracks internally) -- lets a wandb chart
+        # show the realized warmup/cosine-decay curve directly instead of it being
+        # implicit in config.lr_schedule's hyperparameters.
+        "learning_rate": lr_schedule(state.step),
     }
     return new_state, info
 
@@ -256,6 +275,7 @@ def main(config: _config.TrainConfig):
     )
 
     infos = []
+    interval_start = time.monotonic()
     for step in pbar:
         with sharding.set_mesh(mesh):
             train_state, info = ptrain_step(train_rng, train_state, batch)
@@ -263,6 +283,14 @@ def main(config: _config.TrainConfig):
         if step % config.log_interval == 0:
             stacked_infos = common_utils.stack_forest(infos)
             reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
+            # Wall-clock throughput over this logging interval (not just the last
+            # step) -- steps_per_sec catches dataloader stalls/GPU-util regressions
+            # that loss/grad_norm alone won't show; examples_per_sec makes runs with
+            # different batch_size directly comparable.
+            interval_elapsed = time.monotonic() - interval_start
+            reduced_info["steps_per_sec"] = len(infos) / interval_elapsed
+            reduced_info["examples_per_sec"] = len(infos) * config.batch_size / interval_elapsed
+            interval_start = time.monotonic()
             info_str = ", ".join(f"{k}={v:.4f}" for k, v in reduced_info.items())
             pbar.write(f"Step {step}: {info_str}")
             wandb.log(reduced_info, step=step)

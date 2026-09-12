@@ -248,6 +248,13 @@ class AbsoluteActions(DataTransformFn):
 class TokenizePrompt(DataTransformFn):
     tokenizer: _tokenizer.PaligemmaTokenizer
     discrete_state_input: bool = False
+    # Fraction of examples (pi05's discrete_state_input path only) for which the
+    # "State: ..." clause is dropped from the tokenized prompt entirely -- not
+    # zeroed, omitted -- so the policy sees zero proprioception signal for that
+    # example, preventing over-reliance on state (e.g. pi05_extended_quantilesfixed_
+    # state_dropout in training/config.py). 0.0 (default) is a no-op, matching
+    # every other config's existing behavior.
+    state_dropout_prob: float = 0.0
 
     def __call__(self, data: DataDict) -> DataDict:
         if (prompt := data.pop("prompt", None)) is None:
@@ -256,6 +263,8 @@ class TokenizePrompt(DataTransformFn):
         if self.discrete_state_input:
             if (state := data.get("state", None)) is None:
                 raise ValueError("State is required.")
+            if self.state_dropout_prob > 0.0 and np.random.rand() < self.state_dropout_prob:
+                state = None
         else:
             state = None
 

@@ -67,6 +67,7 @@ class Pi0(_model.BaseModel):
     def __init__(self, config: pi0_config.Pi0Config, rngs: nnx.Rngs):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
         self.pi05 = config.pi05
+        self.simulated_delay = config.simulated_delay
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
         # TODO: rewrite gemma in NNX. For now, use bridge.
@@ -138,12 +139,17 @@ class Pi0(_model.BaseModel):
 
     @at.typecheck
     def embed_suffix(
-        self, obs: _model.Observation, noisy_actions: _model.Actions, timestep: at.Float[at.Array, " b"]
+        self,
+        obs: _model.Observation,
+        noisy_actions: _model.Actions,
+        # Per-example (" b") flow timestep, or -- training-time RTC only (pi05,
+        # Pi0Config.simulated_delay) -- one timestep per action-chunk position ("b ah").
+        timestep: at.Float[at.Array, " b"] | at.Float[at.Array, "b ah"],
     ) -> tuple[
         at.Float[at.Array, "b s emb"],
         at.Bool[at.Array, "b s"],
         at.Bool[at.Array, " s"],
-        at.Float[at.Array, "b emb"] | None,
+        at.Float[at.Array, "b emb"] | at.Float[at.Array, "b ah emb"] | None,
     ]:
         input_mask = []
         ar_mask = []
@@ -158,7 +164,17 @@ class Pi0(_model.BaseModel):
 
         action_tokens = self.action_in_proj(noisy_actions)
         # embed timestep using sine-cosine positional encoding with sensitivity in the range [0, 1]
-        time_emb = posemb_sincos(timestep, self.action_in_proj.out_features, min_period=4e-3, max_period=4.0)
+        emb_dim = self.action_in_proj.out_features
+        if timestep.ndim == 1:
+            time_emb = posemb_sincos(timestep, emb_dim, min_period=4e-3, max_period=4.0)
+        else:
+            # training-time RTC: embed each action-chunk position's timestep independently,
+            # then reshape back -- posemb_sincos is a pointwise function of a flat batch of
+            # scalars, so flattening (b, ah) -> (b * ah,) and unflattening is equivalent to
+            # (and cheaper than) vmapping over the chunk axis.
+            b, ah = timestep.shape
+            time_emb = posemb_sincos(timestep.reshape(b * ah), emb_dim, min_period=4e-3, max_period=4.0)
+            time_emb = time_emb.reshape(b, ah, emb_dim)
         if self.pi05:
             # time MLP (for adaRMS)
             time_emb = self.time_mlp_in(time_emb)
@@ -194,14 +210,46 @@ class Pi0(_model.BaseModel):
 
         batch_shape = actions.shape[:-2]
         noise = jax.random.normal(noise_rng, actions.shape)
-        time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
-        time_expanded = time[..., None, None]
+
+        loss_scale = None
+        if self.simulated_delay is None:
+            time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
+            suffix_timestep = time
+            time_expanded = time[..., None, None]
+        else:
+            # Training-time RTC (Pi0Config.simulated_delay, notes/training_time_rtc.md;
+            # "Training-Time Action Conditioning for Efficient Real-Time Chunking", arXiv
+            # 2512.05964): simulate a per-example inference delay `delay` in
+            # [0, simulated_delay), weighted towards small delays like the paper's
+            # reference implementation (third_party/real-time-chunking-kinetix/src/
+            # model.py:FlowPolicy.loss). The first `delay` action-chunk positions are
+            # treated as already resolved/committed -- pinned to local time 0 (this repo's
+            # flow convention: t=0 is the clean action, t=1 is pure noise, opposite of the
+            # reference repo's) -- so x_t equals the ground-truth action there, and the
+            # action expert only needs to predict the flow for the remaining noisy suffix.
+            delay_rng, time_rng = jax.random.split(time_rng)
+            time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
+            w = jnp.exp(jnp.arange(self.simulated_delay, dtype=jnp.float32)[::-1])
+            w = w / jnp.sum(w)
+            delay = jax.random.choice(delay_rng, self.simulated_delay, batch_shape, p=w)
+            resolved = jnp.arange(self.action_horizon) < delay[..., None]  # [*b, ah]
+            suffix_timestep = jnp.where(resolved, 0.0, time[..., None])  # [*b, ah]
+            time_expanded = suffix_timestep[..., None]
+            # Rescale the still-noisy suffix positions' loss so a plain mean over the ah
+            # axis downstream (scripts/train.py's loss_fn, and RA-BC's per-item weighting
+            # on top of that) recovers the mean over only those positions, rather than
+            # being diluted by the zeroed-out resolved prefix.
+            num_suffix = jnp.sum(~resolved, axis=-1, keepdims=True)  # [*b, 1]
+            loss_scale = jnp.where(resolved, 0.0, self.action_horizon / (num_suffix + 1e-6))  # [*b, ah]
+
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
         # one big forward pass of prefix + suffix at once
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
-        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
+        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
+            observation, x_t, suffix_timestep
+        )
         input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
         ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
         attn_mask = make_attn_mask(input_mask, ar_mask)
@@ -211,7 +259,10 @@ class Pi0(_model.BaseModel):
         )
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
-        return jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        if loss_scale is not None:
+            loss = loss * loss_scale
+        return loss
 
     @override
     def sample_actions(

@@ -75,6 +75,13 @@ class FASTTokenizer:
         prefix_tokens = self._paligemma_tokenizer.encode(prefix, add_bos=True)
 
         if actions is not None:
+            # openpi.transforms.Normalize's quantile rescale is intentionally unclipped, so
+            # outliers beyond q01/q99 legitimately land outside [-1, 1] -- the FAST
+            # tokenizer's DCT+chr()-based encoding isn't robust to that (chr() raises
+            # ValueError for a large enough codepoint), so a rare outlier action can crash
+            # training. Clip here, mirroring yor_ki.KiTargetInputs' own clip for its
+            # separate FAST-tokenized consumer of the same unclipped Normalize output.
+            actions = np.clip(actions, -1.0, 1.0)
             # Tokenize actions with FAST tokenizer --> map to last tokens in PaliGemma vocab
             action_tokens = self._fast_tokenizer(actions[None])[0]
             action_tokens_in_pg = self._act_tokens_to_paligemma_tokens(action_tokens)
@@ -132,6 +139,34 @@ class FASTTokenizer:
         return self._fast_tokenizer.decode(
             [action_tokens.tolist()], time_horizon=action_horizon, action_dim=action_dim
         )[0]
+
+    def tokenize_action_only(self, actions: np.ndarray, max_len: int) -> tuple[np.ndarray, np.ndarray]:
+        """Builds just the `[bos, "Action: ", <FAST tokens>, "|"]` span, without
+        `tokenize()`'s own "Task: ..., State: ...;\\n" prefix -- for Knowledge
+        Insulation's discrete auxiliary loss, where that prefix is already provided by
+        the model's own prompt (`embed_prefix`), not duplicated here."""
+        action_tokens = self._fast_tokenizer(actions[None])[0]
+        action_tokens_in_pg = self._act_tokens_to_paligemma_tokens(action_tokens)
+        tokens = (
+            [self._paligemma_tokenizer.bos_id()]
+            + self._paligemma_tokenizer.encode("Action: ")
+            + action_tokens_in_pg.tolist()
+            + self._paligemma_tokenizer.encode("|", add_eos=True)
+        )
+        tokens_len = len(tokens)
+        if tokens_len < max_len:
+            padding = [False] * (max_len - tokens_len)
+            mask = [True] * tokens_len + padding
+            tokens = tokens + [0] * (max_len - tokens_len)
+        else:
+            if tokens_len > max_len:
+                logging.warning(
+                    f"Token length ({tokens_len}) exceeds max length ({max_len}), truncating. "
+                    "Consider increasing `max_action_tokens` if this happens frequently."
+                )
+            tokens = tokens[:max_len]
+            mask = [True] * max_len
+        return np.asarray(tokens), np.asarray(mask)
 
     def _act_tokens_to_paligemma_tokens(self, tokens: np.ndarray | list[int]) -> np.ndarray:
         if isinstance(tokens, list):

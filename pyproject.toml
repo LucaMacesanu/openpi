@@ -3,7 +3,7 @@ name = "openpi"
 version = "0.1.0"
 description = "Physical Intelligence open source repo"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.13"
 license = { file = "LICENSE" }
 dependencies = [
     "augmax>=0.3.4",
@@ -13,13 +13,18 @@ dependencies = [
     "flatbuffers>=24.3.25",
     "flax==0.10.2",
     "fsspec[gcs]>=2024.6.0",
-    "gym-aloha>=0.1.1",
+    # dropped: unused (no references under src/ or scripts/) and its `mujoco` pin fails
+    # to build here (needs MUJOCO_PATH / a system mujoco install this cluster lacks).
+    # "gym-aloha>=0.1.1",
     "imageio>=2.36.1",
     "jax[cuda12]==0.5.3",
     "jaxtyping==0.2.36",
-    "lerobot",
+    # [dataset] extra (pandas/pyarrow/datasets): required for LeRobotDataset/
+    # LeRobotDatasetMetadata's parquet reading -- not in lerobot's base install (mirrors
+    # the same finding in the root viktr pyproject.toml).
+    "lerobot[dataset]>=0.6.1",
     "ml_collections==1.0.0",
-    "numpy>=1.22.4,<2.0.0",
+    "numpy>=2.0.0,<2.3.0",
     "numpydantic>=1.6.6",
     "opencv-python>=4.10.0.84",
     "openpi-client",
@@ -35,7 +40,11 @@ dependencies = [
     "beartype==0.19.0",
     "chex==0.1.90",
     "treescope>=0.1.7",
-    "transformers==4.53.2",
+    # >=4.53.2 rather than pinned exact: lerobot>=0.6.1 needs huggingface-hub>=1.6, which
+    # 4.53.2 doesn't support. The transformers_replace patch (README's "Converting JAX
+    # Models to PyTorch" step) targets the PyTorch model path (models_pytorch/), which
+    # yor_icl_pi05_easy_pnp_v2 (JAX Pi0Config) never touches, so this bump is safe for us.
+    "transformers>=4.53.2",
     "rich>=14.0.0",
     "polars>=1.30.0",
 ]
@@ -54,21 +63,26 @@ dev = [
     "matplotlib>=3.10.0",
     "pynvml>=12.0.0",
 ]
-rlds = [
-    # NOTE: tensorflow-cpu 2.15.0 only ships cp311 wheels on PyPI.
-    # Use `uv venv --python 3.11` before `uv sync --group rlds`.
-    "dlimp",
-    "tensorflow-cpu==2.15.0",
-    "tensorflow-datasets==4.9.9",
-]
 
 [tool.uv]
-override-dependencies = ["ml-dtypes==0.4.1", "tensorstore==0.1.74"]
+# This project only ever runs on the HPC cluster (Linux x86_64, CUDA via
+# jax[cuda12]/torch); restricting resolution to that platform avoids uv having to
+# find a universally-satisfiable lock across irrelevant platforms (aarch64, macOS)
+# whose own transitive constraints (e.g. lerobot's aarch64-specific torchcodec
+# pin) would otherwise conflict with pins below.
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+# torchcodec: lerobot[dataset] pulls it in unpinned, which uv otherwise resolves
+# to the latest release (0.11.x, built for torch>=2.11) -- incompatible with our
+# pinned torch==2.7.1 (ImportError: undefined symbol torch_dtype_float4_e2m1fn_x2
+# at torchcodec's shared-lib load time, so lerobot silently falls back to its much
+# slower pyav video decoder, which is a real GPU-utilization bottleneck in
+# training). torchcodec's compat table pins 0.3-0.5 to torch 2.7. A plain
+# `dependencies` pin conflicts with lerobot's own aarch64-specific torchcodec
+# constraint during resolution, so this must be an override, not a dependency.
+override-dependencies = ["ml-dtypes==0.4.1", "tensorstore==0.1.74", "torchcodec==0.5"]
 
 [tool.uv.sources]
 openpi-client = { workspace = true }
-lerobot = { git = "https://github.com/huggingface/lerobot", rev = "0cf864870cf29f4738d3ade893e6fd13fbd7cdb5" }
-dlimp = { git = "https://github.com/kvablack/dlimp", rev = "ad72ce3a9b414db2185bc0b38461d4101a65477a" }
 
 [tool.uv.workspace]
 members = ["packages/*"]
