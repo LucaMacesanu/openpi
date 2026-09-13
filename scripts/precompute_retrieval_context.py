@@ -190,6 +190,10 @@ def precompute_episode(
     context_text_max_length: int,
     frame_window_size: int,
     interp: InterpConfig | None = None,
+    context_camera_keys: tuple[str, ...] | None = None,
+    state_norm_stats: NormStats | None = None,
+    action_norm_stats: NormStats | None = None,
+    fast_tokenizer_path: str | None = None,
 ) -> int:
     """Processes one episode's frames in fixed-size windows (decode -> embed -> retrieve
     -> build_context_block), writing each window's output directly into on-disk
@@ -260,7 +264,16 @@ def precompute_episode(
                 else None
             )
             chunks = retrieve_chunks(metric, pool, k, query_embedding=query_embedding, query_value=query_value)
-            block = build_context_block(chunks, primary_camera, context_frames_per_chunk, context_text_max_length)
+            block = build_context_block(
+                chunks,
+                primary_camera,
+                context_frames_per_chunk,
+                context_text_max_length,
+                context_camera_keys=context_camera_keys,
+                state_norm_stats=state_norm_stats,
+                action_norm_stats=action_norm_stats,
+                fast_tokenizer_path=fast_tokenizer_path,
+            )
             if interp is not None:
                 block.update(
                     action_interpolation_extras(
@@ -385,7 +398,27 @@ def main() -> None:
         type=Path,
         default=None,
         help="assets/<config>/icl-dataset/norm_stats.json to read the 'actions' q01/q99 from, for quantile-"
-        "normalizing the neighbor's actions before FAST-tokenizing -- required with --use-action-interpolation",
+        "normalizing the neighbor's actions before FAST-tokenizing -- required with --use-action-interpolation "
+        "AND with --context-camera-keys (the redesigned context encoding)",
+    )
+    parser.add_argument(
+        "--context-camera-keys",
+        type=str,
+        default=None,
+        help="comma-separated camera keys (e.g. 'observation.images.zed,observation.images.fish0,"
+        "observation.images.fish1') -- when set, enables the redesigned context encoding (one camera view per "
+        "key per chunk, task+digitized-state+truncated-action combined via FASTTokenizer.tokenize instead of the "
+        "legacy digit-dump text). Requires a pool built by scripts/build_pool_canonical_3cam.py, and "
+        "--state-norm-stats-json/--action-norm-stats-json/--fast-tokenizer-path all set. Length must equal "
+        "--context-frames-per-chunk.",
+    )
+    parser.add_argument(
+        "--state-norm-stats-json",
+        type=Path,
+        default=None,
+        help="assets/<config>/icl-dataset/norm_stats.json to read the 'state' q01/q99 from, for quantile-"
+        "normalizing the neighbor's state before digitizing it into the context text -- required with "
+        "--context-camera-keys",
     )
     args = parser.parse_args()
 
@@ -409,6 +442,25 @@ def main() -> None:
             drop_base_lift=args.drop_base_lift,
             canonical_actions=args.canonical_actions,
             action_norm_stats=action_norm_stats,
+        )
+
+    context_camera_keys: tuple[str, ...] | None = None
+    context_state_norm_stats: NormStats | None = None
+    context_action_norm_stats: NormStats | None = None
+    if args.context_camera_keys is not None:
+        context_camera_keys = tuple(args.context_camera_keys.split(","))
+        if len(context_camera_keys) != args.context_frames_per_chunk:
+            raise ValueError(
+                f"--context-camera-keys has {len(context_camera_keys)} entries but "
+                f"--context-frames-per-chunk={args.context_frames_per_chunk}"
+            )
+        if not args.fast_tokenizer_path:
+            raise ValueError("--context-camera-keys requires --fast-tokenizer-path")
+        if args.state_norm_stats_json is None or args.action_norm_stats_json is None:
+            raise ValueError("--context-camera-keys requires --state-norm-stats-json and --action-norm-stats-json")
+        context_state_norm_stats = NormStats(**json.loads(args.state_norm_stats_json.read_text())["norm_stats"]["state"])
+        context_action_norm_stats = NormStats(
+            **json.loads(args.action_norm_stats_json.read_text())["norm_stats"]["actions"]
         )
 
     all_episodes: dict[str, list[int]] = json.loads(args.all_episodes_json.read_text())
@@ -446,6 +498,10 @@ def main() -> None:
             context_text_max_length=args.context_text_max_length,
             frame_window_size=args.frame_window_size,
             interp=interp,
+            context_camera_keys=context_camera_keys,
+            state_norm_stats=context_state_norm_stats,
+            action_norm_stats=context_action_norm_stats,
+            fast_tokenizer_path=args.fast_tokenizer_path,
         )
         elapsed = time.time() - start
         rate = f" ({elapsed / n_new:.3f}s/frame)" if n_new else ""

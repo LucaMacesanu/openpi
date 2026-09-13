@@ -789,6 +789,21 @@ class LeRobotYorVictrDataConfig(LeRobotYorDataConfig):
     lamda: float = 10.0
     max_action_tokens: int = 192
 
+    # Redesigned context encoding (openpi.policies.yor_retrieval.build_context_block/
+    # build_chunk_context_tokens): when set, context_frames_per_chunk camera views
+    # (in this order) are read per retrieved chunk instead of context_frames_per_chunk
+    # TIME frames from one camera, and context_tokens is built via the real pi0.5
+    # combined task+digitized-state+truncated-action tokenization instead of the
+    # legacy digit-dump text. None (default) preserves the exact legacy behavior for
+    # every arm that hasn't opted in. Requires a pool built by
+    # scripts/build_pool_canonical_3cam.py and context_fast_tokenizer_path set.
+    context_camera_keys: tuple[str, ...] | None = None
+    # Separate from Pi0FastVictrConfig.fast_model_tokenizer_kwargs (RICL's own
+    # discrete-action-stream tokenizer) -- Pi0VictrConfig (continuous flow-matching)
+    # has no such field, so the redesigned context encoding's tokenizer path must be
+    # supplied directly here. Required when context_camera_keys is set.
+    context_fast_tokenizer_path: str | None = None
+
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         # Two model configs implement the context_* fields this DataConfig wires up:
@@ -827,14 +842,18 @@ class LeRobotYorVictrDataConfig(LeRobotYorDataConfig):
                     max_action_tokens=self.max_action_tokens,
                     fast_tokenizer_path=(model_config.fast_model_tokenizer_kwargs or {}).get("fast_tokenizer_path")
                     if self.use_action_interpolation
-                    else None,
+                    else self.context_fast_tokenizer_path,
                     action_horizon=model_config.action_horizon if self.use_action_interpolation else None,
                     drop_base_lift=self.drop_base_lift if self.use_action_interpolation else False,
-                    action_norm_stats=(base.norm_stats or {}).get("actions") if self.use_action_interpolation else None,
+                    action_norm_stats=(base.norm_stats or {}).get("actions")
+                    if (self.use_action_interpolation or self.context_camera_keys is not None)
+                    else None,
                     # See RetrievalContextInputs.prompt_to_task_overrides' docstring --
                     # only matters for the live-retrieval path (precomputed_context_dir=
                     # None); harmless (empty dict -> None) for the precomputed path.
                     prompt_to_task_overrides={v: k for k, v in self.task_prompt_overrides.items()} or None,
+                    context_camera_keys=self.context_camera_keys,
+                    state_norm_stats=(base.norm_stats or {}).get("state") if self.context_camera_keys is not None else None,
                 ),
                 yor_policy.YorInputs(drop_base_lift=self.drop_base_lift),
             ],
@@ -896,15 +915,19 @@ class LeRobotYorVictrCanonicalDataConfig(LeRobotYorVictrDataConfig):
                     max_action_tokens=self.max_action_tokens,
                     fast_tokenizer_path=(model_config.fast_model_tokenizer_kwargs or {}).get("fast_tokenizer_path")
                     if self.use_action_interpolation
-                    else None,
+                    else self.context_fast_tokenizer_path,
                     action_horizon=model_config.action_horizon if self.use_action_interpolation else None,
                     drop_base_lift=self.drop_base_lift if self.use_action_interpolation else False,
                     # The pool's `actions` are already ICRA-canonical (delta-pos + rot6d
                     # + gripper, no base/lift dims) -- see
                     # yor_retrieval.RetrievalContextInputs.canonical_actions' docstring.
                     canonical_actions=self.use_action_interpolation,
-                    action_norm_stats=(base.norm_stats or {}).get("actions") if self.use_action_interpolation else None,
+                    action_norm_stats=(base.norm_stats or {}).get("actions")
+                    if (self.use_action_interpolation or self.context_camera_keys is not None)
+                    else None,
                     prompt_to_task_overrides={v: k for k, v in self.task_prompt_overrides.items()} or None,
+                    context_camera_keys=self.context_camera_keys,
+                    state_norm_stats=(base.norm_stats or {}).get("state") if self.context_camera_keys is not None else None,
                 ),
                 yor_policy.YorInputsCanonical(),
             ],
@@ -2072,6 +2095,204 @@ _CONFIGS = [
         ema_decay=None,
         save_interval=5_000,
         weight_loader=weight_loaders.VictrCheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+    ),
+    TrainConfig(
+        # Redesigned context encoding, replacing arms 3-5 above (which train on a
+        # broken context encoding -- chunk_to_context_text digitizes state/action to
+        # decimal text with NO real digitized-state-in-text mechanism, silently
+        # truncated to 64/64 tokens per chunk, losing ~22% of state and 100% of
+        # action -- see the "Redesigned VICTR context" plan). This arm instead uses
+        # openpi.policies.yor_retrieval.build_chunk_context_tokens: task text +
+        # digitized state + DCT-truncated native action combined into ONE token
+        # span via the real, unmodified pi0.5 mechanism (FASTTokenizer.tokenize) --
+        # exactly how the query's own state/action are already embedded for pi0.5
+        # (state_proj only exists `if not config.pi05`, confirmed by reading pi0.py
+        # directly), so this introduces no new model params.
+        #
+        # num_context_chunks=1 (not 3): a real, exhaustive worst-case measurement of
+        # this exact encoding (all 9,856 native 30-step windows across all 20
+        # canonical pools: mean=127.6, p99=197.5, max=248 tokens) plus 3-camera
+        # context (context_frames_per_chunk=3 -- one view per camera per chunk, not
+        # multiple time frames) real-OOM'd at k=3/batch_size=128 and even at
+        # k=3/batch_size=64-with-tighter-truncation attempts on a 1-GPU probe (needed
+        # 67-78GB more than the ~64GB rematerialization could free) -- the memory
+        # cost is dominated by the 3x-per-chunk SigLIP image encodes, not context
+        # text length. k=1/batch_size=256 (32/device -> 64/device on 4xH200) was the
+        # combination explicitly confirmed OK by a real 1-GPU probe (95.9GB usage vs.
+        # 63.8GB floor).
+        #
+        # pool_dir points at victr_icl_pool_canonical_3cam_224 (scripts/
+        # build_pool_canonical_3cam.py: all 3 camera views per chunk +
+        # action_native30_truncated), NOT the 1-camera victr_icl_pool_canonical_224
+        # arms 3-5 use. precomputed_context_dir is a FRESH precompute (k=1, 3cam,
+        # this encoding) -- outputs/victr/retrieval_context_expanded (arms 3-5's
+        # precompute) is the WRONG encoding/camera-count/k and must not be reused.
+        #
+        # weight_loader points at a plain (non-VICTR) pi0.5 checkpoint already
+        # well-trained on this exact canonical action/state space and task set
+        # (yor_icl_pi05_canonical_extended, step 40000, pinned outside
+        # clean_stale_checkpoints.sh's scan pattern so it survives that still-running
+        # job's own checkpoint rotation) instead of pi05_base -- avoids re-learning
+        # the base task distribution from scratch on top of VICTR's added
+        # retrieval-context complexity. VictrCheckpointWeightLoader's
+        # missing_regex already tolerates the one new param
+        # (neighbor_rank_embedding) this checkpoint lacks.
+        #
+        # lr_schedule: warmup_init_lr=9.65e-6 is yor_icl_pi05_canonical_extended's
+        # own LR at step 40000 (computed from its CosineDecaySchedule(warmup_steps=
+        # 2000, peak_lr=5e-5, decay_steps=50000, decay_lr=5e-6) via the cosine
+        # formula) -- warmup ramps from there to the new peak (1e-5) over 1000 steps
+        # rather than restarting from near-zero, since the loaded checkpoint is
+        # already well into its own annealing.
+        name="yor_icl_victr_vision_canonical_ctx3cam",
+        model=pi0_victr.Pi0VictrConfig(
+            pi05=True,
+            action_horizon=30,
+            retrieval_metric="vision",
+            num_context_chunks=1,
+            context_frames_per_chunk=3,
+            context_text_max_length=256,
+        ),
+        data=LeRobotYorVictrCanonicalDataConfig(
+            repo_id="icl-dataset",
+            root="/scratch/lim2045/icl_ws/icl-dataset-fixed-obs",
+            assets=AssetsConfig(assets_dir="assets/yor_icl_pi05_canonical_extended"),
+            base_config=DataConfig(prompt_from_task=True),
+            retrieval_metric="vision",
+            episodes_path="assets/yor_icl_canonical_extended_episodes.json",
+            task_prompt_overrides=YOR_EXPANDED_TASK_PROMPT_OVERRIDES,
+            pool_dir="assets/victr_icl_pool_canonical_3cam_224",
+            precomputed_context_dir="/scratch/lim2045/icl_ws/viktr/outputs/victr/retrieval_context_canonical_3cam_k1",
+            context_camera_keys=(
+                "observation.images.zed",
+                "observation.images.fish0",
+                "observation.images.fish1",
+            ),
+            context_fast_tokenizer_path=(
+                "/scratch/lim2045/icl_ws/viktr/third_party/nyu-finger-robot/outputs/fast_tokenizer/"
+                "yor-icl-canonical"
+            ),
+        ),
+        batch_size=256,
+        num_workers=8,
+        num_train_steps=30_000,
+        seed=42,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            warmup_init_lr=9.65e-6,
+            peak_lr=1e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(b1=0.9, b2=0.95, eps=1e-6, weight_decay=0.01, clip_gradient_norm=1.0),
+        ema_decay=None,
+        save_interval=5_000,
+        weight_loader=weight_loaders.VictrCheckpointWeightLoader(
+            "/scratch/lim2045/icl_ws/viktr/third_party/openpi/checkpoints/_pinned/"
+            "pi05_canonical_extended_step40000/params"
+        ),
+    ),
+    TrainConfig(
+        # Same as yor_icl_victr_vision_canonical_ctx3cam above, retrieval_metric=
+        # "value" instead of "vision".
+        name="yor_icl_victr_value_canonical_ctx3cam",
+        model=pi0_victr.Pi0VictrConfig(
+            pi05=True,
+            action_horizon=30,
+            retrieval_metric="value",
+            num_context_chunks=1,
+            context_frames_per_chunk=3,
+            context_text_max_length=256,
+        ),
+        data=LeRobotYorVictrCanonicalDataConfig(
+            repo_id="icl-dataset",
+            root="/scratch/lim2045/icl_ws/icl-dataset-fixed-obs",
+            assets=AssetsConfig(assets_dir="assets/yor_icl_pi05_canonical_extended"),
+            base_config=DataConfig(prompt_from_task=True),
+            retrieval_metric="value",
+            episodes_path="assets/yor_icl_canonical_extended_episodes.json",
+            task_prompt_overrides=YOR_EXPANDED_TASK_PROMPT_OVERRIDES,
+            pool_dir="assets/victr_icl_pool_canonical_3cam_224",
+            precomputed_context_dir="/scratch/lim2045/icl_ws/viktr/outputs/victr/retrieval_context_canonical_3cam_k1",
+            context_camera_keys=(
+                "observation.images.zed",
+                "observation.images.fish0",
+                "observation.images.fish1",
+            ),
+            context_fast_tokenizer_path=(
+                "/scratch/lim2045/icl_ws/viktr/third_party/nyu-finger-robot/outputs/fast_tokenizer/"
+                "yor-icl-canonical"
+            ),
+        ),
+        batch_size=256,
+        num_workers=8,
+        num_train_steps=30_000,
+        seed=42,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            warmup_init_lr=9.65e-6,
+            peak_lr=1e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(b1=0.9, b2=0.95, eps=1e-6, weight_decay=0.01, clip_gradient_norm=1.0),
+        ema_decay=None,
+        save_interval=5_000,
+        weight_loader=weight_loaders.VictrCheckpointWeightLoader(
+            "/scratch/lim2045/icl_ws/viktr/third_party/openpi/checkpoints/_pinned/"
+            "pi05_canonical_extended_step40000/params"
+        ),
+    ),
+    TrainConfig(
+        # Same as yor_icl_victr_vision_canonical_ctx3cam above, retrieval_metric=
+        # "vision_value" (fixed-weight vision+value fusion, paper Sec III-G).
+        name="yor_icl_victr_vision_value_canonical_ctx3cam",
+        model=pi0_victr.Pi0VictrConfig(
+            pi05=True,
+            action_horizon=30,
+            retrieval_metric="vision_value",
+            num_context_chunks=1,
+            context_frames_per_chunk=3,
+            context_text_max_length=256,
+        ),
+        data=LeRobotYorVictrCanonicalDataConfig(
+            repo_id="icl-dataset",
+            root="/scratch/lim2045/icl_ws/icl-dataset-fixed-obs",
+            assets=AssetsConfig(assets_dir="assets/yor_icl_pi05_canonical_extended"),
+            base_config=DataConfig(prompt_from_task=True),
+            retrieval_metric="vision_value",
+            episodes_path="assets/yor_icl_canonical_extended_episodes.json",
+            task_prompt_overrides=YOR_EXPANDED_TASK_PROMPT_OVERRIDES,
+            pool_dir="assets/victr_icl_pool_canonical_3cam_224",
+            precomputed_context_dir="/scratch/lim2045/icl_ws/viktr/outputs/victr/retrieval_context_canonical_3cam_k1",
+            context_camera_keys=(
+                "observation.images.zed",
+                "observation.images.fish0",
+                "observation.images.fish1",
+            ),
+            context_fast_tokenizer_path=(
+                "/scratch/lim2045/icl_ws/viktr/third_party/nyu-finger-robot/outputs/fast_tokenizer/"
+                "yor-icl-canonical"
+            ),
+        ),
+        batch_size=256,
+        num_workers=8,
+        num_train_steps=30_000,
+        seed=42,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            warmup_init_lr=9.65e-6,
+            peak_lr=1e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(b1=0.9, b2=0.95, eps=1e-6, weight_decay=0.01, clip_gradient_norm=1.0),
+        ema_decay=None,
+        save_interval=5_000,
+        weight_loader=weight_loaders.VictrCheckpointWeightLoader(
+            "/scratch/lim2045/icl_ws/viktr/third_party/openpi/checkpoints/_pinned/"
+            "pi05_canonical_extended_step40000/params"
+        ),
     ),
     TrainConfig(
         # ICRA canonical arm 6 -- RICL (arXiv:2508.02062; notes/action_interpolation.md):

@@ -62,6 +62,19 @@ class Chunk:
     proprio: np.ndarray  # (L, state_dim) float32
     actions: np.ndarray  # (L, action_dim) float32
     value: np.ndarray | None = None
+    # Written by scripts/build_pool_canonical_3cam.py, present only in
+    # victr_icl_pool_canonical_3cam_224/ pools -- the redesigned context encoding's
+    # native (action_horizon-length, not chunk_size-length) action window, and its
+    # DCT-frequency-truncated (keep 20/30 bins) counterpart. fast_tokens_truncated/
+    # _mask are that script's own action-only FAST tokenization (pre-dates this
+    # session's state_proj correction, when state was meant to be embedded
+    # separately) and are NOT used by build_chunk_context_tokens below -- action_
+    # native30_truncated is re-tokenized together with state via the real
+    # FASTTokenizer.tokenize(task, state, action) combined call instead.
+    action_native30_raw: np.ndarray | None = None
+    action_native30_truncated: np.ndarray | None = None
+    fast_tokens_truncated: np.ndarray | None = None
+    fast_tokens_truncated_mask: np.ndarray | None = None
 
 
 @dataclasses.dataclass
@@ -291,20 +304,61 @@ def build_context_block(
     primary_camera: str,
     context_frames_per_chunk: int,
     context_text_max_length: int,
+    *,
+    context_camera_keys: tuple[str, ...] | None = None,
+    state_norm_stats: transforms.NormStats | None = None,
+    action_norm_stats: transforms.NormStats | None = None,
+    fast_tokenizer_path: str | None = None,
 ) -> dict[str, np.ndarray]:
     """Builds the fixed-shape context_images/context_image_masks/context_tokens/
     context_tokens_mask block from an already-retrieved (farthest-to-nearest) chunk
     list. Shared by RetrievalContextInputs.__call__ and the offline precompute
-    script, so precomputed output is guaranteed identical to the live path's."""
+    script, so precomputed output is guaranteed identical to the live path's.
+
+    Two modes, selected by whether context_camera_keys is set:
+
+    - None (default, legacy): one camera (primary_camera), context_frames_per_chunk
+      TIME frames sampled evenly across the chunk, text built by the old
+      digitize-to-decimal-text chunk_to_context_text (silently truncated at
+      context_text_max_length -- kept only so existing callers/configs that never
+      opted into the redesign are unaffected).
+    - Set (redesigned encoding): context_frames_per_chunk must equal
+      len(context_camera_keys) -- one CAMERA VIEW per slot (all from the chunk's
+      start frame) instead of multiple time frames from one camera. Text is built
+      by build_chunk_context_tokens: the real pi0.5 mechanism
+      (FASTTokenizer.tokenize combining task text + digitized state + the
+      neighbor's DCT-truncated native action window into one span), requiring
+      state_norm_stats/action_norm_stats/fast_tokenizer_path and pool chunks built
+      by scripts/build_pool_canonical_3cam.py (chunk.action_native30_truncated set).
+    """
     k = len(chunks)
-    tokenizer = _context_tokenizer(context_text_max_length)
+    use_redesigned = context_camera_keys is not None
+    if use_redesigned:
+        if len(context_camera_keys) != context_frames_per_chunk:
+            raise ValueError(
+                f"context_camera_keys has {len(context_camera_keys)} entries but "
+                f"context_frames_per_chunk={context_frames_per_chunk}"
+            )
+        if state_norm_stats is None or action_norm_stats is None or fast_tokenizer_path is None:
+            raise ValueError(
+                "context_camera_keys (redesigned context encoding) requires "
+                "state_norm_stats, action_norm_stats, and fast_tokenizer_path"
+            )
+        fast_tok = _context_fast_tokenizer(fast_tokenizer_path, context_text_max_length)
+    else:
+        tokenizer = _context_tokenizer(context_text_max_length)
+
     frame_stack = []
     token_ids = []
     token_masks = []
     for chunk in chunks:
-        frame_idx = np.linspace(0, len(chunk.proprio) - 1, context_frames_per_chunk).round().astype(np.int64)
-        frame_stack.append(chunk.images[primary_camera][frame_idx])
-        ids, mask = tokenizer.tokenize(chunk_to_context_text(chunk))
+        if use_redesigned:
+            frame_stack.append(np.stack([chunk.images[cam][0] for cam in context_camera_keys], axis=0))
+            ids, mask = build_chunk_context_tokens(chunk, fast_tok, state_norm_stats, action_norm_stats)
+        else:
+            frame_idx = np.linspace(0, len(chunk.proprio) - 1, context_frames_per_chunk).round().astype(np.int64)
+            frame_stack.append(chunk.images[primary_camera][frame_idx])
+            ids, mask = tokenizer.tokenize(chunk_to_context_text(chunk))
         token_ids.append(ids)
         token_masks.append(mask)
 
@@ -386,6 +440,13 @@ def _digitize(values: np.ndarray) -> np.ndarray:
 
 
 def chunk_to_context_text(chunk: Chunk) -> str:
+    """LEGACY (kept only for callers that never opted into the redesigned encoding
+    below): digitizes proprio/actions to decimal text and hands the whole thing to
+    PaligemmaTokenizer.tokenize(text) as one plain string (no `state=` kwarg -> no
+    real digitized-state-in-text mechanism, just decimal digits as ordinary
+    vocabulary tokens). This is the broken encoding notes/context_encoding_redesign.md
+    Sec 1 measured losing ~22% of state and 100% of action at the old 64-token
+    budget -- see build_chunk_context_tokens for the fix."""
     state_bins = _digitize(chunk.proprio[0])
     state_str = " ".join(map(str, state_bins))
     num_action_frames = min(len(chunk.actions), 8)
@@ -394,6 +455,55 @@ def chunk_to_context_text(chunk: Chunk) -> str:
     action_str = "; ".join(" ".join(map(str, frame)) for frame in action_bins)
     cleaned_task = chunk.task.strip().replace("_", " ").replace("\n", " ")
     return f"Task: {cleaned_task}, State: {state_str}; Action: {action_str}"
+
+
+def _quantile_normalize(x: np.ndarray, stats: transforms.NormStats) -> np.ndarray:
+    """Matches openpi.transforms.Normalize._normalize_quantile exactly (same
+    formula, same 1e-6 epsilon) -- the neighbor's state/action must land on the
+    SAME normalized scale the query's own state/action go through via that
+    transform, downstream of this one."""
+    q01 = np.asarray(stats.q01, dtype=np.float64)
+    q99 = np.asarray(stats.q99, dtype=np.float64)
+    return (x.astype(np.float64) - q01) / (q99 - q01 + 1e-6) * 2.0 - 1.0
+
+
+def build_chunk_context_tokens(
+    chunk: Chunk,
+    tok: _tokenizer.FASTTokenizer,
+    state_norm_stats: transforms.NormStats,
+    action_norm_stats: transforms.NormStats,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Redesigned per-chunk context text: task + the neighbor's own state + its
+    DCT-truncated native action window, combined into ONE token span via the real,
+    unmodified pi0.5 mechanism -- FASTTokenizer.tokenize(prompt, state, actions)
+    digitizes state into the prompt text itself (np.digitize into 256 bins,
+    PaligemmaTokenizer's own "Task: ..., State: ...;\\nAction: " convention) and
+    FAST-tokenizes the action into the same span. This is exactly how the query's
+    own state/action are already embedded for pi0.5 (state_proj only exists `if not
+    config.pi05`, confirmed by reading pi0.py directly -- pi0.5 has no continuous
+    state embedding to reuse), so this introduces NO new model parameters and NO
+    change to Pi0Victr.embed_context_chunks: it already handles exactly this one
+    text-token span per chunk.
+
+    Requires chunk.action_native30_truncated (written by
+    scripts/build_pool_canonical_3cam.py: the neighbor's native, action_horizon-
+    length action window, DCT-frequency-truncated to keep 20/30 bins) rather than
+    the pool's chunk_size-length `actions` -- matches this session's real exhaustive
+    measurement (measure_combined_context_budget.py, all 9,856 native windows
+    across all 20 canonical pools: mean=127.6, p99=197.5, max=248 tokens) exactly,
+    since that script used the identical DCT convention (same KEEP_BINS=20,
+    ACTION_HORIZON=30, same scipy.fft.dct/idct with norm="ortho").
+    """
+    if chunk.action_native30_truncated is None:
+        raise ValueError(
+            f"chunk (episode {chunk.episode_index}, start_frame {chunk.start_frame}) has no "
+            "action_native30_truncated -- rebuild its pool via scripts/build_pool_canonical_3cam.py"
+        )
+    state_norm = _quantile_normalize(chunk.proprio[0], state_norm_stats).astype(np.float32)
+    action_norm = _quantile_normalize(chunk.action_native30_truncated, action_norm_stats).astype(np.float32)
+    task_text = chunk.task.strip().replace("_", " ").replace("\n", " ")
+    ids, mask, _ar_mask, _loss_mask = tok.tokenize(task_text, state_norm, action_norm)
+    return ids, mask
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +535,15 @@ def _action_only_tokenizer(fast_tokenizer_path: str, max_action_tokens: int) -> 
     nearest-chunk target, via tokenize_action_only (also used by
     openpi.policies.yor_ki.KiTargetInputs)."""
     return _tokenizer.FASTTokenizer(max_len=max_action_tokens, fast_tokenizer_path=fast_tokenizer_path)
+
+
+@functools.lru_cache(maxsize=None)
+def _context_fast_tokenizer(fast_tokenizer_path: str, context_text_max_length: int) -> _tokenizer.FASTTokenizer:
+    """The redesigned context encoding's tokenizer -- FASTTokenizer.tokenize's full
+    combined (task+state+action) call, used by build_chunk_context_tokens. Separate
+    cache key from _action_only_tokenizer (different max_len convention: this one
+    bounds the whole combined span, e.g. 256, not just the action postfix)."""
+    return _tokenizer.FASTTokenizer(max_len=context_text_max_length, fast_tokenizer_path=fast_tokenizer_path)
 
 
 @functools.lru_cache(maxsize=None)
@@ -539,6 +658,21 @@ class RetrievalContextInputs(transforms.DataTransformFn):
     # FileNotFoundError-equivalent crash (missing .pkl for the overridden slug).
     prompt_to_task_overrides: dict[str, str] | None = None
 
+    # Redesigned context encoding (see build_context_block/build_chunk_context_tokens):
+    # when set, context_frames_per_chunk camera views (in this order) are read from
+    # each retrieved chunk instead of context_frames_per_chunk TIME frames from
+    # primary_camera, and context_tokens is built via the real pi0.5 combined
+    # task+state+action tokenization instead of the legacy digit-dump text. None
+    # (default) preserves the exact legacy single-camera behavior. Requires a pool
+    # built by scripts/build_pool_canonical_3cam.py (chunk.action_native30_truncated
+    # set) and state_norm_stats/action_norm_stats/fast_tokenizer_path all set.
+    context_camera_keys: tuple[str, ...] | None = None
+    # Quantile norm_stats for the "state" key (LeRobotYorVictrDataConfig.create()
+    # passes self.create_base_config(...).norm_stats["state"]) -- same role as
+    # action_norm_stats below, but for the neighbor's state. Only used when
+    # context_camera_keys is set.
+    state_norm_stats: transforms.NormStats | None = None
+
     def __call__(self, data: transforms.DataDict) -> transforms.DataDict:
         if self.precomputed_dir is not None:
             episode_arrays = _load_precomputed_episode(
@@ -571,7 +705,14 @@ class RetrievalContextInputs(transforms.DataTransformFn):
         )
 
         context = build_context_block(
-            chunks, self.primary_camera, self.context_frames_per_chunk, self.context_text_max_length
+            chunks,
+            self.primary_camera,
+            self.context_frames_per_chunk,
+            self.context_text_max_length,
+            context_camera_keys=self.context_camera_keys,
+            state_norm_stats=self.state_norm_stats,
+            action_norm_stats=self.action_norm_stats,
+            fast_tokenizer_path=self.fast_tokenizer_path,
         )
 
         if self.use_action_interpolation:

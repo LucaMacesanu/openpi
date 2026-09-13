@@ -20,10 +20,16 @@ class CosineDecaySchedule(LRScheduleConfig):
     peak_lr: float = 2.5e-5
     decay_steps: int = 30_000
     decay_lr: float = 2.5e-6
+    # When set, warmup starts from this LR instead of the near-zero
+    # peak_lr/(warmup_steps+1) default -- for resuming/warm-starting from a
+    # checkpoint that was already partway through its own schedule (e.g. a
+    # canonical-extended checkpoint at step 40000, LR ~9.65e-6), where restarting
+    # warmup from ~0 would undo that checkpoint's own annealing progress.
+    warmup_init_lr: float | None = None
 
     def create(self) -> optax.Schedule:
         return optax.warmup_cosine_decay_schedule(
-            init_value=self.peak_lr / (self.warmup_steps + 1),
+            init_value=self.warmup_init_lr if self.warmup_init_lr is not None else self.peak_lr / (self.warmup_steps + 1),
             peak_value=self.peak_lr,
             warmup_steps=self.warmup_steps,
             decay_steps=self.decay_steps,
