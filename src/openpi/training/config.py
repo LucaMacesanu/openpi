@@ -2295,6 +2295,43 @@ _CONFIGS = [
         ),
     ),
     TrainConfig(
+        # Plain-pi05 (no VICTR/retrieval) baseline for the 3 ctx3cam arms above: same
+        # warm-start checkpoint (yor_icl_pi05_canonical_extended step 40000), same
+        # episode set/task set, same batch_size/num_train_steps/lr_schedule/optimizer/
+        # seed -- the only difference is model=Pi0Config (no retrieval context at
+        # all) instead of Pi0VictrConfig, so any gain the 3 ctx3cam arms show over
+        # this arm is attributable to VICTR's retrieval-context conditioning, not to
+        # extra warm-started training steps continuing on the same checkpoint.
+        name="yor_icl_pi05_canonical_warmstart_baseline",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=30),
+        data=LeRobotYorCanonicalDataConfig(
+            repo_id="icl-dataset",
+            root="/scratch/lim2045/icl_ws/icl-dataset-fixed-obs",
+            assets=AssetsConfig(assets_dir="assets/yor_icl_pi05_canonical_extended"),
+            base_config=DataConfig(prompt_from_task=True),
+            episodes_path="assets/yor_icl_canonical_extended_episodes.json",
+            task_prompt_overrides=YOR_EXPANDED_TASK_PROMPT_OVERRIDES,
+        ),
+        batch_size=256,
+        num_workers=8,
+        num_train_steps=30_000,
+        seed=42,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            warmup_init_lr=9.65e-6,
+            peak_lr=1e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(b1=0.9, b2=0.95, eps=1e-6, weight_decay=0.01, clip_gradient_norm=1.0),
+        ema_decay=None,
+        save_interval=5_000,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "/scratch/lim2045/icl_ws/viktr/third_party/openpi/checkpoints/_pinned/"
+            "pi05_canonical_extended_step40000/params"
+        ),
+    ),
+    TrainConfig(
         # ICRA canonical arm 6 -- RICL (arXiv:2508.02062; notes/action_interpolation.md):
         # blends the model's own predicted action tokens with the top-1 retrieved
         # chunk's actual action tokens at every decode step, weighted by
