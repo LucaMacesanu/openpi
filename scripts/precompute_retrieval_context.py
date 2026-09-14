@@ -139,26 +139,27 @@ def _split_pairs_into_shards(
     concurrent processes on the same node each hold their own full copy, which is
     exactly the OOM job 16350893 hit.
 
-    Deterministic (same inputs -> same split), same as _assign_tasks_to_shards."""
+    Deterministic (same inputs -> same split), same as _assign_tasks_to_shards.
+
+    Greedy fill, not fixed-size pre-splitting: largest task first, always peeling
+    episodes into whichever shard is currently least-loaded, taking just enough to
+    bring that shard up to the running target -- this reaches near-perfect balance
+    (all shards within 1 episode of the mean) rather than fixed equal-sized splits,
+    which leave leftover-part remainders stacking unevenly onto a handful of bins."""
     total_episodes = sum(len(all_episodes[t]) for t in tasks)
-    target_per_shard = max(1, round(total_episodes / num_shards))
+    target = total_episodes / num_shards
 
-    units: list[tuple[str, list[int]]] = []
-    for task in tasks:
-        episodes = all_episodes[task]
-        n_parts = max(1, round(len(episodes) / target_per_shard))
-        if n_parts == 1:
-            units.append((task, list(episodes)))
-        else:
-            units.extend((task, list(part)) for part in np.array_split(episodes, n_parts) if len(part))
-
-    order = sorted(range(len(units)), key=lambda i: len(units[i][1]), reverse=True)
     bins: list[list[tuple[str, list[int]]]] = [[] for _ in range(num_shards)]
     bin_totals = [0] * num_shards
-    for i in order:
-        j = min(range(num_shards), key=lambda b: bin_totals[b])
-        bins[j].append(units[i])
-        bin_totals[j] += len(units[i][1])
+    order = sorted(tasks, key=lambda t: len(all_episodes[t]), reverse=True)
+    for task in order:
+        remaining = list(all_episodes[task])
+        while remaining:
+            j = min(range(num_shards), key=lambda b: bin_totals[b])
+            take_n = max(1, min(len(remaining), round(target - bin_totals[j])))
+            bins[j].append((task, remaining[:take_n]))
+            bin_totals[j] += take_n
+            remaining = remaining[take_n:]
     return bins
 
 
