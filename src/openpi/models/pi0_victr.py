@@ -97,6 +97,28 @@ class Pi0Victr(pi0.Pi0):
             jnp.concatenate([ctx_ar, query_ar], axis=0),
         )
 
+    @at.typecheck
+    def _blended_action_target(
+        self, actions: _model.Actions, observation: _model.Observation
+    ) -> _model.Actions:
+        """Action-interpolation training target (notes/action_interpolation.md;
+        Pi0VictrConfig.use_action_interpolation's docstring) -- the continuous
+        analogue of Pi0FastVictr.interpolate_actions' discrete token-distribution
+        blend. Convex-blends the query's own true action with the top-1 retrieved
+        chunk's actual action (obs.nearest_action), weighted by
+        obs.exp_lamda_distance: weight=0 (nearest chunk far away) reproduces the
+        query's own action unmodified, matching interpolate_actions' same weight=0
+        fallback. Unlike the discrete case -- which only ever touches the CE loss,
+        never the tokens the model is conditioned on -- this blended value becomes
+        the actual flow-matching target `compute_loss` builds `x_t`/`u_t` from, so a
+        high-weight blend also changes what noisy `x_t` the network is trained to
+        condition on, not just the regression target it's scored against. This is
+        the simpler of two defensible translations (the other being: keep x_t tied
+        to the true action and only blend u_t) -- flagged here as a real design
+        choice, not a forced one."""
+        weight = observation.exp_lamda_distance[..., None, None]
+        return (1 - weight) * actions + weight * observation.nearest_action
+
     @override
     def compute_loss(
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
@@ -104,12 +126,16 @@ class Pi0Victr(pi0.Pi0):
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
+        target_actions = actions
+        if self.victr_config.use_action_interpolation:
+            target_actions = self._blended_action_target(actions, observation)
+
         batch_shape = actions.shape[:-2]
         noise = jax.random.normal(noise_rng, actions.shape)
         time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
         time_expanded = time[..., None, None]
-        x_t = time_expanded * noise + (1 - time_expanded) * actions
-        u_t = noise - actions
+        x_t = time_expanded * noise + (1 - time_expanded) * target_actions
+        u_t = noise - target_actions
 
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix_with_context(observation)
         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
@@ -123,6 +149,35 @@ class Pi0Victr(pi0.Pi0):
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
         return jnp.mean(jnp.square(v_t - u_t), axis=-1)
+
+    @at.typecheck
+    def _blend_velocity(
+        self,
+        v_t: at.Float[at.Array, "b ah ad"],
+        x_t: at.Float[at.Array, "b ah ad"],
+        time: at.Float[at.Array, ""],
+        observation: _model.Observation,
+    ) -> at.Float[at.Array, "b ah ad"]:
+        """Sample-time counterpart of _blended_action_target above -- there is no
+        ground-truth action to blend toward at inference, only the current noisy
+        iterate x_t, so this blends the *velocity field* instead of the target
+        directly (the direct analogue of Pi0FastVictr._blend_decode_step blending
+        per-step logits rather than a target token).
+
+        For the same linear interpolant compute_loss uses (x_t = t*noise +
+        (1-t)*target), the implied velocity toward *any* hypothetical target y,
+        given only the current (x_t, t), is (x_t - y) / t -- exactly u_t = noise - y
+        when x_t truly lies on that line (algebraically: x_t - y = t*(noise - y)).
+        Using y = obs.nearest_action gives the "what velocity would point this same
+        x_t at the neighbor's action instead" counterpart to the model's own
+        predicted v_t, blended by the same obs.exp_lamda_distance weight
+        (weight=0 reproduces v_t unmodified). `time` never reaches exactly 0 inside
+        sample_actions' while_loop (cond stops at time < -dt/2, i.e. the smallest
+        time fed here is dt = 1/num_steps), so this division is always well-defined
+        at this call site -- not a general-purpose safe-divide."""
+        weight = observation.exp_lamda_distance[:, None, None]
+        v_neighbor = (x_t - observation.nearest_action) / time
+        return (1 - weight) * v_t + weight * v_neighbor
 
     @override
     def sample_actions(
@@ -162,6 +217,8 @@ class Pi0Victr(pi0.Pi0):
                 adarms_cond=[None, adarms_cond],
             )
             v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+            if self.victr_config.use_action_interpolation:
+                v_t = self._blend_velocity(v_t, x_t, time, observation)
             return x_t + dt * v_t, time + dt
 
         def cond(carry):
@@ -200,12 +257,38 @@ class Pi0VictrConfig(pi0_config.Pi0Config):
     # which arm is running).
     retrieval_metric: Literal["vision", "value", "vision_value"] = "vision"
 
+    # RICL-style action interpolation (arXiv:2508.02062; notes/action_interpolation.md),
+    # adapted for a flow-matching action head -- the continuous analogue of
+    # pi0_fast_victr.Pi0FastVictrConfig's own use_action_interpolation (which blends
+    # discrete FAST-token logits; not applicable here, a flow-matching head has no
+    # vocabulary/logits to blend). PROTOTYPE: the model-side computation below assumes
+    # obs.exp_lamda_distance/obs.nearest_action are already populated -- unlike the
+    # FAST case, no data-pipeline wiring (yor_retrieval.py extras function,
+    # LeRobotYorVictrCanonicalDataConfig fields, a precompute-script flag) exists yet
+    # to actually populate them; this is model-architecture prototyping only, not yet
+    # runnable end-to-end.
+    #
+    # When set, Pi0Victr.compute_loss/sample_actions blend the top-1 retrieved chunk's
+    # own native action (obs.nearest_action) into the flow-matching target/velocity,
+    # weighted by obs.exp_lamda_distance = exp(-lamda * normalized top-1 vision
+    # distance) -- same weighting convention as the FAST case (weight=0 when the
+    # nearest chunk is far away falls back to the query's own action/prediction
+    # unmodified), just applied to a continuous target instead of a token
+    # distribution. See Pi0Victr.compute_loss/sample_actions for the exact formulas
+    # and why they differ (loss-time blends the actual regression target; sample-time
+    # blends the per-step velocity field, since there is no ground-truth action to
+    # blend toward at inference time).
+    use_action_interpolation: bool = False
+    lamda: float = 10.0
+
     def __post_init__(self):
         super().__post_init__()
         if self.num_context_chunks < 0:
             raise ValueError(f"num_context_chunks must be >= 0, got {self.num_context_chunks}")
         if self.context_frames_per_chunk < 1:
             raise ValueError(f"context_frames_per_chunk must be >= 1, got {self.context_frames_per_chunk}")
+        if self.use_action_interpolation and self.retrieval_metric != "vision":
+            raise ValueError("use_action_interpolation requires retrieval_metric='vision'")
 
     @override
     def create(self, rng: at.KeyArrayLike) -> "Pi0Victr":
@@ -229,4 +312,12 @@ class Pi0VictrConfig(pi0_config.Pi0Config):
                 context_tokens=context_tokens_spec,
                 context_tokens_mask=context_tokens_mask_spec,
             )
+            if self.use_action_interpolation:
+                observation_spec = dataclasses.replace(
+                    observation_spec,
+                    exp_lamda_distance=jax.ShapeDtypeStruct([batch_size], jnp.float32),
+                    nearest_action=jax.ShapeDtypeStruct(
+                        [batch_size, self.action_horizon, self.action_dim], jnp.float32
+                    ),
+                )
         return observation_spec, action_spec

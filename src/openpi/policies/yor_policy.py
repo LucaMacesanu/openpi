@@ -102,6 +102,7 @@ class YorInputs(transforms.DataTransformFn):
             "subtask_tokens_mask",
             "nearest_action_tokens",
             "nearest_action_tokens_mask",
+            "nearest_action",
             "exp_lamda_distance",
         ):
             if key in data:
@@ -192,6 +193,7 @@ class YorInputsAbsoluteJoint(transforms.DataTransformFn):
             "subtask_tokens_mask",
             "nearest_action_tokens",
             "nearest_action_tokens_mask",
+            "nearest_action",
             "exp_lamda_distance",
         ):
             if key in data:
@@ -279,6 +281,7 @@ class YorInputsDeltaRot6D(transforms.DataTransformFn):
             "subtask_tokens_mask",
             "nearest_action_tokens",
             "nearest_action_tokens_mask",
+            "nearest_action",
             "exp_lamda_distance",
         ):
             if key in data:
@@ -378,6 +381,7 @@ class YorInputsAlignedQ(transforms.DataTransformFn):
             "subtask_tokens_mask",
             "nearest_action_tokens",
             "nearest_action_tokens_mask",
+            "nearest_action",
             "exp_lamda_distance",
         ):
             if key in data:
@@ -461,6 +465,7 @@ class YorInputsAlignedDeltaRot6D(transforms.DataTransformFn):
             "subtask_tokens_mask",
             "nearest_action_tokens",
             "nearest_action_tokens_mask",
+            "nearest_action",
             "exp_lamda_distance",
         ):
             if key in data:
@@ -570,6 +575,7 @@ class YorInputsCanonical(transforms.DataTransformFn):
             "subtask_tokens_mask",
             "nearest_action_tokens",
             "nearest_action_tokens_mask",
+            "nearest_action",
             "exp_lamda_distance",
         ):
             if key in data:

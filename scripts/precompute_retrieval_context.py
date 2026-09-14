@@ -74,6 +74,7 @@ from openpi.policies.yor_retrieval import (  # noqa: E402
     _parse_image,
     action_interpolation_extras,
     build_context_block,
+    continuous_action_interpolation_extras,
     embed_frames,
     load_pool,
     retrieve_chunks,
@@ -121,10 +122,57 @@ def _assign_tasks_to_shards(tasks: list[str], pool_dir: Path, num_shards: int) -
     return bins
 
 
+def _split_pairs_into_shards(
+    tasks: list[str], all_episodes: dict[str, list[int]], num_shards: int
+) -> list[list[tuple[str, list[int]]]]:
+    """Like _assign_tasks_to_shards, but a task is allowed to span MULTIPLE shards --
+    splits any task whose episode count would dominate a shard into near-equal
+    contiguous sub-lists first, then greedy-LPT bin-packs all (task, episode-sublist)
+    units by real episode count. Unlike pool byte size, episode count directly tracks
+    real per-shard wall-clock work here.
+
+    Only safe for pool sizes small enough that a handful of extra redundant pool loads
+    (one per shard a split task lands in) is a rounding error -- this project's
+    canonical 3-camera pools top out at 5.1GB (vs. the 36GB expanded-task-set pools
+    _assign_tasks_to_shards' docstring's OOM warning is about). Do NOT use this for
+    the expanded pool set: splitting a 36GB task across shards means that many
+    concurrent processes on the same node each hold their own full copy, which is
+    exactly the OOM job 16350893 hit.
+
+    Deterministic (same inputs -> same split), same as _assign_tasks_to_shards."""
+    total_episodes = sum(len(all_episodes[t]) for t in tasks)
+    target_per_shard = max(1, round(total_episodes / num_shards))
+
+    units: list[tuple[str, list[int]]] = []
+    for task in tasks:
+        episodes = all_episodes[task]
+        n_parts = max(1, round(len(episodes) / target_per_shard))
+        if n_parts == 1:
+            units.append((task, list(episodes)))
+        else:
+            units.extend((task, list(part)) for part in np.array_split(episodes, n_parts) if len(part))
+
+    order = sorted(range(len(units)), key=lambda i: len(units[i][1]), reverse=True)
+    bins: list[list[tuple[str, list[int]]]] = [[] for _ in range(num_shards)]
+    bin_totals = [0] * num_shards
+    for i in order:
+        j = min(range(num_shards), key=lambda b: bin_totals[b])
+        bins[j].append(units[i])
+        bin_totals[j] += len(units[i][1])
+    return bins
+
+
 _INTERP_ARRAY_KEYS = ("exp_lamda_distance", "nearest_action_tokens", "nearest_action_tokens_mask")
+# Continuous analogue, for Pi0VictrConfig.use_action_interpolation (see
+# yor_retrieval.continuous_action_interpolation_extras) -- shares the
+# exp_lamda_distance name/semantics with the discrete case above (same formula),
+# but "nearest_action" instead of the two "nearest_action_tokens*" arrays.
+_CONTINUOUS_INTERP_ARRAY_KEYS = ("exp_lamda_distance", "nearest_action")
 
 
-def _episode_output_paths(out_dir: Path, metric: str, episode_index: int, *, interp: bool = False) -> dict[str, Path]:
+def _episode_output_paths(
+    out_dir: Path, metric: str, episode_index: int, *, interp: bool = False, continuous_interp: bool = False
+) -> dict[str, Path]:
     metric_dir = out_dir / metric
     stem = str(episode_index)
     paths = {
@@ -136,6 +184,9 @@ def _episode_output_paths(out_dir: Path, metric: str, episode_index: int, *, int
     if interp:
         for key in _INTERP_ARRAY_KEYS:
             paths[key] = metric_dir / f"{stem}_{key}.npy"
+    if continuous_interp:
+        for key in _CONTINUOUS_INTERP_ARRAY_KEYS:
+            paths[key] = metric_dir / f"{stem}_{key}.npy"
     return paths
 
 
@@ -143,7 +194,9 @@ def _already_done(paths: dict[str, Path]) -> bool:
     return all(p.exists() for p in paths.values())
 
 
-def _partial_paths(out_dir: Path, metric: str, episode_index: int, *, interp: bool = False) -> dict[str, Path]:
+def _partial_paths(
+    out_dir: Path, metric: str, episode_index: int, *, interp: bool = False, continuous_interp: bool = False
+) -> dict[str, Path]:
     metric_dir = out_dir / metric
     stem = str(episode_index)
     paths = {
@@ -155,6 +208,9 @@ def _partial_paths(out_dir: Path, metric: str, episode_index: int, *, interp: bo
     }
     if interp:
         for key in _INTERP_ARRAY_KEYS:
+            paths[key] = metric_dir / f"{stem}_{key}.npy.partial"
+    if continuous_interp:
+        for key in _CONTINUOUS_INTERP_ARRAY_KEYS:
             paths[key] = metric_dir / f"{stem}_{key}.npy.partial"
     return paths
 
@@ -176,6 +232,19 @@ class InterpConfig:
     action_norm_stats: NormStats | None
 
 
+@dataclasses.dataclass(frozen=True)
+class ContinuousInterpConfig:
+    """Continuous analogue of InterpConfig above, for Pi0VictrConfig.
+    use_action_interpolation (see yor_retrieval.continuous_action_interpolation_extras)
+    -- no max_action_tokens/fast_tokenizer_path/action_horizon/drop_base_lift/
+    canonical_actions needed, since there's no FAST-tokenization or chunk_size-to-
+    action_horizon resampling involved (the 3cam pool's chunk.action_native30_truncated
+    is already a native action_horizon-length, canonical-encoding window)."""
+
+    lamda: float
+    action_norm_stats: NormStats | None
+
+
 def precompute_episode(
     *,
     task: str,
@@ -190,6 +259,7 @@ def precompute_episode(
     context_text_max_length: int,
     frame_window_size: int,
     interp: InterpConfig | None = None,
+    continuous_interp: ContinuousInterpConfig | None = None,
     context_camera_keys: tuple[str, ...] | None = None,
     state_norm_stats: NormStats | None = None,
     action_norm_stats: NormStats | None = None,
@@ -214,7 +284,9 @@ def precompute_episode(
     already fully done, in which case the caller should have already skipped it via
     _already_done on the final paths -- this is just a safety net).
     """
-    final_paths = _episode_output_paths(out_dir, metric, episode_index, interp=interp is not None)
+    final_paths = _episode_output_paths(
+        out_dir, metric, episode_index, interp=interp is not None, continuous_interp=continuous_interp is not None
+    )
     if _already_done(final_paths):
         return 0
 
@@ -225,7 +297,9 @@ def precompute_episode(
     dataset = LeRobotDataset("icl-dataset", root=icl_dataset_root, episodes=[episode_index], tolerance_s=2e-4)
     num_frames = len(dataset)
 
-    partial_paths = _partial_paths(out_dir, metric, episode_index, interp=interp is not None)
+    partial_paths = _partial_paths(
+        out_dir, metric, episode_index, interp=interp is not None, continuous_interp=continuous_interp is not None
+    )
     partial_paths["progress"].parent.mkdir(parents=True, exist_ok=True)
     frames_done = (
         json.loads(partial_paths["progress"].read_text())["frames_done"]
@@ -238,6 +312,9 @@ def precompute_episode(
     if interp is not None:
         array_keys = array_keys + _INTERP_ARRAY_KEYS
         block_keys = block_keys + _INTERP_ARRAY_KEYS  # action_interpolation_extras' own key names, no prefix
+    if continuous_interp is not None:
+        array_keys = array_keys + _CONTINUOUS_INTERP_ARRAY_KEYS
+        block_keys = block_keys + _CONTINUOUS_INTERP_ARRAY_KEYS  # continuous_action_interpolation_extras' own keys
 
     memmaps: dict[str, np.memmap] | None = None
     if frames_done > 0:
@@ -291,6 +368,18 @@ def precompute_episode(
                         action_norm_stats=interp.action_norm_stats,
                     )
                 )
+            if continuous_interp is not None:
+                block.update(
+                    continuous_action_interpolation_extras(
+                        chunks=chunks,
+                        query_embedding=query_embedding,
+                        pool=pool,
+                        pool_dir=pool_dir,
+                        task=task,
+                        lamda=continuous_interp.lamda,
+                        action_norm_stats=continuous_interp.action_norm_stats,
+                    )
+                )
             window_blocks.append(block)
 
         if memmaps is None:
@@ -321,7 +410,8 @@ def precompute_episode(
                     raise ValueError(
                         f"episode {episode_index}: existing {partial_paths[array_key]} has per-frame shape "
                         f"{actual}, but this run's --num-context-chunks/--context-frames-per-chunk/"
-                        f"--context-text-max-length/--use-action-interpolation produce {expected} -- delete the "
+                        f"--context-text-max-length/--use-action-interpolation/"
+                        f"--use-continuous-action-interpolation produce {expected} -- delete the "
                         f"stale .partial and _progress.json files for this episode and rerun."
                     )
 
@@ -357,6 +447,15 @@ def main() -> None:
     parser.add_argument("--tasks", default="all", help="'all' or a comma-separated list of task strings")
     parser.add_argument("--num-shards", type=int, default=1)
     parser.add_argument("--shard-index", type=int, default=0)
+    parser.add_argument(
+        "--balance-episodes-across-shards",
+        action="store_true",
+        help="split large tasks' episodes across multiple shards for even load (see "
+        "_split_pairs_into_shards) instead of assigning whole tasks per shard. Only safe for small "
+        "pools (<=~5GB/task, e.g. victr_icl_pool_canonical_3cam_224) -- do NOT use on the expanded "
+        "pool set (up to 36GB/task), where splitting risks the OOM _assign_tasks_to_shards exists "
+        "to avoid.",
+    )
     parser.add_argument("--limit", type=int, default=None, help="process only the first N (task, episode) pairs in this shard -- for pilot timing runs")
     parser.add_argument(
         "--frame-window-size",
@@ -373,6 +472,16 @@ def main() -> None:
         "(yor_retrieval.action_interpolation_extras) per frame, so RetrievalContextInputs with "
         "use_action_interpolation=True can read this precomputed_dir instead of live retrieval. "
         "Requires --metric vision.",
+    )
+    parser.add_argument(
+        "--use-continuous-action-interpolation",
+        action="store_true",
+        help="also precompute exp_lamda_distance/nearest_action "
+        "(yor_retrieval.continuous_action_interpolation_extras) per frame, so RetrievalContextInputs with "
+        "use_continuous_action_interpolation=True (Pi0VictrConfig's flow-matching action head) can read this "
+        "precomputed_dir instead of live retrieval. Requires --metric vision, --action-norm-stats-json, and a "
+        "pool built by scripts/build_pool_canonical_3cam.py (chunk.action_native30_truncated set) -- mutually "
+        "exclusive with --use-action-interpolation (that one is Pi0FastVictrConfig-only).",
     )
     parser.add_argument("--lamda", type=float, default=10.0)
     parser.add_argument("--max-action-tokens", type=int, default=192)
@@ -422,6 +531,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if args.use_action_interpolation and args.use_continuous_action_interpolation:
+        raise ValueError(
+            "--use-action-interpolation (Pi0FastVictrConfig, discrete) and "
+            "--use-continuous-action-interpolation (Pi0VictrConfig, continuous) are mutually exclusive"
+        )
+
     interp: InterpConfig | None = None
     if args.use_action_interpolation:
         if args.metric != "vision":
@@ -443,6 +558,17 @@ def main() -> None:
             canonical_actions=args.canonical_actions,
             action_norm_stats=action_norm_stats,
         )
+
+    continuous_interp: ContinuousInterpConfig | None = None
+    if args.use_continuous_action_interpolation:
+        if args.metric != "vision":
+            raise ValueError("--use-continuous-action-interpolation requires --metric vision")
+        if args.action_norm_stats_json is None:
+            raise ValueError("--use-continuous-action-interpolation requires --action-norm-stats-json")
+        continuous_action_norm_stats = NormStats(
+            **json.loads(args.action_norm_stats_json.read_text())["norm_stats"]["actions"]
+        )
+        continuous_interp = ContinuousInterpConfig(lamda=args.lamda, action_norm_stats=continuous_action_norm_stats)
 
     context_camera_keys: tuple[str, ...] | None = None
     context_state_norm_stats: NormStats | None = None
@@ -466,8 +592,13 @@ def main() -> None:
     all_episodes: dict[str, list[int]] = json.loads(args.all_episodes_json.read_text())
     tasks = list(all_episodes) if args.tasks == "all" else args.tasks.split(",")
 
-    shard_tasks = _assign_tasks_to_shards(tasks, args.pool_dir, args.num_shards)[args.shard_index]
-    pairs = [(task, ep) for task in shard_tasks for ep in all_episodes[task]]
+    if args.balance_episodes_across_shards:
+        shard_units = _split_pairs_into_shards(tasks, all_episodes, args.num_shards)[args.shard_index]
+        pairs = [(task, ep) for task, eps in shard_units for ep in eps]
+        shard_tasks = sorted({task for task, _ in shard_units})
+    else:
+        shard_tasks = _assign_tasks_to_shards(tasks, args.pool_dir, args.num_shards)[args.shard_index]
+        pairs = [(task, ep) for task in shard_tasks for ep in all_episodes[task]]
     if args.limit is not None:
         pairs = pairs[: args.limit]
     print(
@@ -479,7 +610,13 @@ def main() -> None:
     metric_dir.mkdir(parents=True, exist_ok=True)
 
     for i, (task, episode_index) in enumerate(pairs):
-        paths = _episode_output_paths(args.out_dir, args.metric, episode_index, interp=interp is not None)
+        paths = _episode_output_paths(
+            args.out_dir,
+            args.metric,
+            episode_index,
+            interp=interp is not None,
+            continuous_interp=continuous_interp is not None,
+        )
         if _already_done(paths):
             print(f"[{i + 1}/{len(pairs)}] episode {episode_index}: already done, skipping")
             continue
@@ -498,6 +635,7 @@ def main() -> None:
             context_text_max_length=args.context_text_max_length,
             frame_window_size=args.frame_window_size,
             interp=interp,
+            continuous_interp=continuous_interp,
             context_camera_keys=context_camera_keys,
             state_norm_stats=context_state_norm_stats,
             action_norm_stats=context_action_norm_stats,

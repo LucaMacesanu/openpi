@@ -159,6 +159,17 @@ class Observation(Generic[ArrayT]):
     nearest_action_tokens: at.Int[ArrayT, "*b nl"] | None = None
     nearest_action_tokens_mask: at.Bool[ArrayT, "*b nl"] | None = None
 
+    # Continuous analogue of nearest_action_tokens above, for a flow-matching action
+    # head (openpi.models.pi0_victr.Pi0Victr, when its use_action_interpolation config
+    # flag is set -- see that module's compute_loss/sample_actions and
+    # notes/action_interpolation.md). No vocabulary/logits exist in a flow-matching
+    # head, so there is nothing to tokenize: this is simply the top-1 retrieved
+    # chunk's own native action window, quantile-normalized the same way as the
+    # query's own `actions` target, padded to the same (action_horizon, action_dim)
+    # shape/convention -- directly blendable against `actions`/`v_t` rather than
+    # against token logits.
+    nearest_action: at.Float[ArrayT, "*b ah ad"] | None = None
+
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":
         """This method defines the mapping between unstructured data (i.e., nested dict) to the structured Observation format."""
@@ -194,6 +205,7 @@ class Observation(Generic[ArrayT]):
             exp_lamda_distance=data.get("exp_lamda_distance"),
             nearest_action_tokens=data.get("nearest_action_tokens"),
             nearest_action_tokens_mask=data.get("nearest_action_tokens_mask"),
+            nearest_action=data.get("nearest_action"),
         )
 
     def to_dict(self) -> at.PyTree[ArrayT]:
@@ -290,6 +302,7 @@ def preprocess_observation(
         exp_lamda_distance=observation.exp_lamda_distance,
         nearest_action_tokens=observation.nearest_action_tokens,
         nearest_action_tokens_mask=observation.nearest_action_tokens_mask,
+        nearest_action=observation.nearest_action,
     )
 
 

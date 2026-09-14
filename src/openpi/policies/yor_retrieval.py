@@ -548,14 +548,25 @@ def _context_fast_tokenizer(fast_tokenizer_path: str, context_text_max_length: i
 
 @functools.lru_cache(maxsize=None)
 def _load_precomputed_episode(
-    precomputed_dir: str, metric: str, episode_index: int, include_interp: bool = False
+    precomputed_dir: str,
+    metric: str,
+    episode_index: int,
+    include_interp: bool = False,
+    include_continuous_interp: bool = False,
 ) -> dict[str, np.ndarray]:
     """Memory-maps one episode's scripts/precompute_retrieval_context.py output --
     cached per process (i.e. once per dataloader worker per episode, not once per
     item, same convention as _load_pool_cached). include_interp=True also loads the
-    action-interpolation-only arrays (exp_lamda_distance/nearest_action_tokens/
-    nearest_action_tokens_mask), written only when precompute_retrieval_context.py was
-    run with --use-action-interpolation."""
+    discrete action-interpolation-only arrays (exp_lamda_distance/
+    nearest_action_tokens/nearest_action_tokens_mask), written only when
+    precompute_retrieval_context.py was run with --use-action-interpolation.
+    include_continuous_interp=True loads the continuous counterpart instead
+    (exp_lamda_distance/nearest_action), written only when that script was run with
+    --use-continuous-action-interpolation. The two are mutually exclusive in
+    practice (one precomputed_dir is built for one specific arm) but not asserted
+    so here -- RetrievalContextInputs.__call__'s own use_action_interpolation/
+    use_continuous_action_interpolation fields are what actually enforce which one
+    a given config requests."""
     metric_dir = Path(precomputed_dir) / metric
     stem = str(episode_index)
     arrays = {
@@ -570,6 +581,9 @@ def _load_precomputed_episode(
         arrays["nearest_action_tokens_mask"] = np.load(
             metric_dir / f"{stem}_nearest_action_tokens_mask.npy", mmap_mode="r"
         )
+    if include_continuous_interp:
+        arrays["exp_lamda_distance"] = np.load(metric_dir / f"{stem}_exp_lamda_distance.npy", mmap_mode="r")
+        arrays["nearest_action"] = np.load(metric_dir / f"{stem}_nearest_action.npy", mmap_mode="r")
     return arrays
 
 
@@ -673,6 +687,23 @@ class RetrievalContextInputs(transforms.DataTransformFn):
     # context_camera_keys is set.
     state_norm_stats: transforms.NormStats | None = None
 
+    # Continuous analogue of use_action_interpolation above, for
+    # openpi.models.pi0_victr.Pi0Victr's flow-matching action head
+    # (Pi0VictrConfig.use_action_interpolation; notes/action_interpolation.md) --
+    # a SEPARATE flag from use_action_interpolation (not a shared one branching on
+    # model type) so the existing, already-running discrete/FAST arms are
+    # untouched by this addition. Reuses `lamda` above (same weighting formula,
+    # same role) but populates continuous_action_interpolation_extras' fields
+    # (exp_lamda_distance, nearest_action) instead of action_interpolation_extras'
+    # (exp_lamda_distance, nearest_action_tokens, nearest_action_tokens_mask).
+    # retrieval_metric must be "vision", same reasoning as use_action_interpolation.
+    # Requires a pool built by scripts/build_pool_canonical_3cam.py
+    # (chunk.action_native30_truncated set) and action_norm_stats set -- same
+    # requirement context_camera_keys already has, so any arm using this also sets
+    # context_camera_keys in practice (VICTR's redesigned encoding and continuous
+    # action interpolation were designed together, not independently).
+    use_continuous_action_interpolation: bool = False
+
     def __call__(self, data: transforms.DataDict) -> transforms.DataDict:
         if self.precomputed_dir is not None:
             episode_arrays = _load_precomputed_episode(
@@ -680,6 +711,7 @@ class RetrievalContextInputs(transforms.DataTransformFn):
                 self.retrieval_metric,
                 int(data["episode_index"]),
                 include_interp=self.use_action_interpolation,
+                include_continuous_interp=self.use_continuous_action_interpolation,
             )
             frame_index = int(data["frame_index"])
             context = {key: np.array(arr[frame_index]) for key, arr in episode_arrays.items()}
@@ -731,6 +763,21 @@ class RetrievalContextInputs(transforms.DataTransformFn):
                     action_horizon=self.action_horizon,
                     drop_base_lift=self.drop_base_lift,
                     canonical_actions=self.canonical_actions,
+                    action_norm_stats=self.action_norm_stats,
+                )
+            )
+
+        if self.use_continuous_action_interpolation:
+            if self.retrieval_metric != "vision":
+                raise ValueError("use_continuous_action_interpolation requires retrieval_metric='vision'")
+            context.update(
+                continuous_action_interpolation_extras(
+                    chunks=chunks,
+                    query_embedding=query_embedding,
+                    pool=pool,
+                    pool_dir=self.pool_dir,
+                    task=task,
+                    lamda=self.lamda,
                     action_norm_stats=self.action_norm_stats,
                 )
             )
@@ -813,4 +860,50 @@ def action_interpolation_extras(
         "exp_lamda_distance": exp_lamda_distance,
         "nearest_action_tokens": tokens[1:],
         "nearest_action_tokens_mask": mask[1:],
+    }
+
+
+def continuous_action_interpolation_extras(
+    *,
+    chunks: list[Chunk],
+    query_embedding: np.ndarray,
+    pool: ChunkDictionary,
+    pool_dir: str,
+    task: str,
+    lamda: float,
+    action_norm_stats: transforms.NormStats | None,
+) -> dict[str, np.ndarray]:
+    """Continuous analogue of action_interpolation_extras above, for
+    openpi.models.pi0_victr.Pi0Victr's flow-matching action head
+    (Pi0VictrConfig.use_action_interpolation; notes/action_interpolation.md) instead
+    of Pi0FastVictr's discrete FAST-token blending. Simpler than the discrete case in
+    three ways: (1) no FAST-tokenization -- Pi0Victr blends a continuous action
+    vector directly (Pi0Victr._blended_action_target/_blend_velocity), never a token
+    distribution; (2) no action_horizon resampling -- the redesigned 3-camera pool's
+    chunk.action_native30_truncated is already a native action_horizon-length window
+    (scripts/build_pool_canonical_3cam.py reads it straight from the source episode
+    at the chunk's own start_frame), unlike the discrete case's documented
+    linear-interpolation-over-chunk-time workaround for a pool built at a shorter
+    context_chunk_size; (3) no canonical_actions/drop_base_lift branching -- the
+    3cam pool's actions are always the canonical 20-dim encoding already, no legacy
+    raw-20-dim representation to handle. Requires pool chunks built by
+    scripts/build_pool_canonical_3cam.py (chunk.action_native30_truncated set)."""
+    nearest = chunks[-1]  # farthest-to-nearest; nearest is last (see action_interpolation_extras)
+    if nearest.action_native30_truncated is None:
+        raise ValueError(
+            "continuous action interpolation requires a pool built by "
+            "scripts/build_pool_canonical_3cam.py (chunk.action_native30_truncated is None)"
+        )
+    nearest_action = nearest.action_native30_truncated.astype(np.float32, copy=True)
+    if action_norm_stats is not None:
+        nearest_action = _quantile_normalize(nearest_action, action_norm_stats).astype(np.float32)
+
+    top1_distance = float(_vision_distances(query_embedding, pool).min())
+    max_distance = _pool_max_vision_distance(pool_dir, task)
+    normalized = np.clip(top1_distance / max_distance, 0.0, 1.0)
+    exp_lamda_distance = np.array(np.exp(-lamda * normalized), dtype=np.float32)
+
+    return {
+        "exp_lamda_distance": exp_lamda_distance,
+        "nearest_action": nearest_action,
     }

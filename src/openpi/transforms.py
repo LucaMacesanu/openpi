@@ -343,6 +343,12 @@ class PadStatesAndActions(DataTransformFn):
         data["state"] = pad_to_dim(data["state"], self.model_action_dim, axis=-1)
         if "actions" in data:
             data["actions"] = pad_to_dim(data["actions"], self.model_action_dim, axis=-1)
+        # Continuous action-interpolation's neighbor action (yor_retrieval.py's
+        # continuous_action_interpolation_extras) is blended directly against
+        # `actions` in Pi0Victr._blended_action_target/_blend_velocity, so it must be
+        # zero-padded to the same model_action_dim or that blend's shapes mismatch.
+        if "nearest_action" in data:
+            data["nearest_action"] = pad_to_dim(data["nearest_action"], self.model_action_dim, axis=-1)
         return data
 
 

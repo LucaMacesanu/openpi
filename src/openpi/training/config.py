@@ -781,13 +781,23 @@ class LeRobotYorVictrDataConfig(LeRobotYorDataConfig):
     # every step. None (default) preserves today's live-computation behavior exactly.
     precomputed_context_dir: str | None = None
 
-    # RICL-style action interpolation (notes/action_interpolation.md) -- only valid
-    # for a pi0_fast_victr.Pi0FastVictrConfig model with its own use_action_interpolation
-    # set to match (see create()'s assert below); ignored (must stay False) for
-    # pi0_victr.Pi0VictrConfig, which has no discrete action-token stream to blend.
+    # RICL-style action interpolation (notes/action_interpolation.md) -- discrete
+    # FAST-token blending, only valid for a pi0_fast_victr.Pi0FastVictrConfig model
+    # with its own use_action_interpolation set to match (see create()'s assert
+    # below). For pi0_victr.Pi0VictrConfig (continuous flow-matching, no discrete
+    # action-token stream to blend), use use_continuous_action_interpolation below
+    # instead -- this field must stay False there.
     use_action_interpolation: bool = False
     lamda: float = 10.0
     max_action_tokens: int = 192
+    # Continuous analogue of use_action_interpolation above, for
+    # pi0_victr.Pi0VictrConfig's flow-matching action head
+    # (Pi0VictrConfig.use_action_interpolation; notes/action_interpolation.md) --
+    # only valid for that model, with its own use_action_interpolation set to match
+    # (see create()'s assert below). Reuses `lamda` above (same weighting formula,
+    # same role for both mechanisms). Must stay False for Pi0FastVictrConfig, which
+    # uses use_action_interpolation (discrete) instead.
+    use_continuous_action_interpolation: bool = False
 
     # Redesigned context encoding (openpi.policies.yor_retrieval.build_context_block/
     # build_chunk_context_tokens): when set, context_frames_per_chunk camera views
@@ -814,12 +824,32 @@ class LeRobotYorVictrDataConfig(LeRobotYorDataConfig):
         # rabc_weights_dir is inherited from LeRobotYorDataConfig but not wired up
         # below -- fail loudly instead of silently ignoring it if ever set here.
         assert self.rabc_weights_dir is None, "RA-BC + VICTR retrieval is not implemented; rabc_weights_dir must be None"
-        use_action_interpolation = getattr(model_config, "use_action_interpolation", False)
-        assert use_action_interpolation == self.use_action_interpolation, (
-            "LeRobotYorVictrDataConfig.use_action_interpolation must match "
-            "model_config.use_action_interpolation (only Pi0FastVictrConfig has the latter; "
-            "Pi0VictrConfig has no discrete action-token stream to blend, so both must be False there)"
-        )
+        # Both Pi0FastVictrConfig and Pi0VictrConfig have their own
+        # use_action_interpolation field (discrete FAST-token blending vs. continuous
+        # flow-matching blending respectively -- see each model's docstring), so a
+        # single generic getattr(..., "use_action_interpolation") can no longer
+        # disambiguate which mechanism a bare match refers to; branch on the model
+        # type explicitly instead.
+        if isinstance(model_config, pi0_fast_victr.Pi0FastVictrConfig):
+            assert model_config.use_action_interpolation == self.use_action_interpolation, (
+                "LeRobotYorVictrDataConfig.use_action_interpolation must match "
+                "Pi0FastVictrConfig.use_action_interpolation"
+            )
+            assert not self.use_continuous_action_interpolation, (
+                "use_continuous_action_interpolation is Pi0VictrConfig-only; "
+                "Pi0FastVictrConfig uses use_action_interpolation instead"
+            )
+        else:
+            assert isinstance(model_config, pi0_victr.Pi0VictrConfig)
+            assert model_config.use_action_interpolation == self.use_continuous_action_interpolation, (
+                "LeRobotYorVictrDataConfig.use_continuous_action_interpolation must match "
+                "Pi0VictrConfig.use_action_interpolation"
+            )
+            assert not self.use_action_interpolation, (
+                "use_action_interpolation (discrete FAST-token blending) is Pi0FastVictrConfig-only; "
+                "Pi0VictrConfig has no discrete action-token stream to blend -- use "
+                "use_continuous_action_interpolation instead"
+            )
         # Loaded once here (not deferred) so RetrievalContextInputs can quantile-
         # normalize the neighbor's actions to the same scale the query's own actions
         # go through via the Normalize transform added downstream in data_loader.py --
@@ -838,6 +868,7 @@ class LeRobotYorVictrDataConfig(LeRobotYorDataConfig):
                     context_text_max_length=model_config.context_text_max_length,
                     precomputed_dir=self.precomputed_context_dir,
                     use_action_interpolation=self.use_action_interpolation,
+                    use_continuous_action_interpolation=self.use_continuous_action_interpolation,
                     lamda=self.lamda,
                     max_action_tokens=self.max_action_tokens,
                     fast_tokenizer_path=(model_config.fast_model_tokenizer_kwargs or {}).get("fast_tokenizer_path")
@@ -846,7 +877,11 @@ class LeRobotYorVictrDataConfig(LeRobotYorDataConfig):
                     action_horizon=model_config.action_horizon if self.use_action_interpolation else None,
                     drop_base_lift=self.drop_base_lift if self.use_action_interpolation else False,
                     action_norm_stats=(base.norm_stats or {}).get("actions")
-                    if (self.use_action_interpolation or self.context_camera_keys is not None)
+                    if (
+                        self.use_action_interpolation
+                        or self.use_continuous_action_interpolation
+                        or self.context_camera_keys is not None
+                    )
                     else None,
                     # See RetrievalContextInputs.prompt_to_task_overrides' docstring --
                     # only matters for the live-retrieval path (precomputed_context_dir=
@@ -884,20 +919,38 @@ class LeRobotYorVictrCanonicalDataConfig(LeRobotYorVictrDataConfig):
     position + absolute rot6d orientation (18-dim, no gripper/lift/base), action is
     delta EE position + absolute rot6d orientation + gripper (20-dim, no lift/base).
     RetrievalContextInputs wiring (pool_dir/retrieval_metric/precomputed_context_dir/
-    use_action_interpolation/lamda/max_action_tokens) is unchanged from the parent
-    class -- it's agnostic to the query's own action/state encoding. `root` must point
-    at a local copy of icl-dataset-fixed-obs, same as LeRobotYorCanonicalDataConfig."""
+    use_action_interpolation/use_continuous_action_interpolation/lamda/
+    max_action_tokens) is unchanged from the parent class -- it's agnostic to the
+    query's own action/state encoding. `root` must point at a local copy of
+    icl-dataset-fixed-obs, same as LeRobotYorCanonicalDataConfig."""
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         assert isinstance(model_config, (pi0_victr.Pi0VictrConfig, pi0_fast_victr.Pi0FastVictrConfig))
         assert self.rabc_weights_dir is None, "RA-BC + VICTR retrieval is not implemented; rabc_weights_dir must be None"
-        use_action_interpolation = getattr(model_config, "use_action_interpolation", False)
-        assert use_action_interpolation == self.use_action_interpolation, (
-            "LeRobotYorVictrCanonicalDataConfig.use_action_interpolation must match "
-            "model_config.use_action_interpolation (only Pi0FastVictrConfig has the latter; "
-            "Pi0VictrConfig has no discrete action-token stream to blend, so both must be False there)"
-        )
+        # See the parent class's create() for why this can no longer be a single
+        # generic getattr check -- both model configs now have their own
+        # use_action_interpolation field (discrete vs. continuous).
+        if isinstance(model_config, pi0_fast_victr.Pi0FastVictrConfig):
+            assert model_config.use_action_interpolation == self.use_action_interpolation, (
+                "LeRobotYorVictrCanonicalDataConfig.use_action_interpolation must match "
+                "Pi0FastVictrConfig.use_action_interpolation"
+            )
+            assert not self.use_continuous_action_interpolation, (
+                "use_continuous_action_interpolation is Pi0VictrConfig-only; "
+                "Pi0FastVictrConfig uses use_action_interpolation instead"
+            )
+        else:
+            assert isinstance(model_config, pi0_victr.Pi0VictrConfig)
+            assert model_config.use_action_interpolation == self.use_continuous_action_interpolation, (
+                "LeRobotYorVictrCanonicalDataConfig.use_continuous_action_interpolation must match "
+                "Pi0VictrConfig.use_action_interpolation"
+            )
+            assert not self.use_action_interpolation, (
+                "use_action_interpolation (discrete FAST-token blending) is Pi0FastVictrConfig-only; "
+                "Pi0VictrConfig has no discrete action-token stream to blend -- use "
+                "use_continuous_action_interpolation instead"
+            )
         base = self.create_base_config(assets_dirs, model_config)
         data_transforms = _transforms.Group(
             inputs=[
@@ -911,6 +964,7 @@ class LeRobotYorVictrCanonicalDataConfig(LeRobotYorVictrDataConfig):
                     context_text_max_length=model_config.context_text_max_length,
                     precomputed_dir=self.precomputed_context_dir,
                     use_action_interpolation=self.use_action_interpolation,
+                    use_continuous_action_interpolation=self.use_continuous_action_interpolation,
                     lamda=self.lamda,
                     max_action_tokens=self.max_action_tokens,
                     fast_tokenizer_path=(model_config.fast_model_tokenizer_kwargs or {}).get("fast_tokenizer_path")
@@ -921,9 +975,15 @@ class LeRobotYorVictrCanonicalDataConfig(LeRobotYorVictrDataConfig):
                     # The pool's `actions` are already ICRA-canonical (delta-pos + rot6d
                     # + gripper, no base/lift dims) -- see
                     # yor_retrieval.RetrievalContextInputs.canonical_actions' docstring.
+                    # Only meaningful for the discrete path (continuous_action_
+                    # interpolation_extras always assumes canonical, see its docstring).
                     canonical_actions=self.use_action_interpolation,
                     action_norm_stats=(base.norm_stats or {}).get("actions")
-                    if (self.use_action_interpolation or self.context_camera_keys is not None)
+                    if (
+                        self.use_action_interpolation
+                        or self.use_continuous_action_interpolation
+                        or self.context_camera_keys is not None
+                    )
                     else None,
                     prompt_to_task_overrides={v: k for k, v in self.task_prompt_overrides.items()} or None,
                     context_camera_keys=self.context_camera_keys,
@@ -2265,6 +2325,90 @@ _CONFIGS = [
             task_prompt_overrides=YOR_EXPANDED_TASK_PROMPT_OVERRIDES,
             pool_dir="assets/victr_icl_pool_canonical_3cam_224",
             precomputed_context_dir="/scratch/lim2045/icl_ws/viktr/outputs/victr/retrieval_context_canonical_3cam_k1",
+            context_camera_keys=(
+                "observation.images.zed",
+                "observation.images.fish0",
+                "observation.images.fish1",
+            ),
+            context_fast_tokenizer_path=(
+                "/scratch/lim2045/icl_ws/viktr/third_party/nyu-finger-robot/outputs/fast_tokenizer/"
+                "yor-icl-canonical"
+            ),
+        ),
+        batch_size=256,
+        num_workers=8,
+        num_train_steps=30_000,
+        seed=42,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            warmup_init_lr=9.65e-6,
+            peak_lr=1e-5,
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(b1=0.9, b2=0.95, eps=1e-6, weight_decay=0.01, clip_gradient_norm=1.0),
+        ema_decay=None,
+        save_interval=5_000,
+        weight_loader=weight_loaders.VictrCheckpointWeightLoader(
+            "/scratch/lim2045/icl_ws/viktr/third_party/openpi/checkpoints/_pinned/"
+            "pi05_canonical_extended_step40000/params"
+        ),
+    ),
+    TrainConfig(
+        # VICTR-vision-ctx3cam + continuous action interpolation (Pi0VictrConfig.
+        # use_action_interpolation; notes/action_interpolation.md) -- same 3-camera/
+        # k=1 context encoding as yor_icl_victr_vision_canonical_ctx3cam above, plus
+        # blending the model's own flow-matching prediction toward the top-1
+        # retrieved chunk's real action (Pi0Victr._blended_action_target/
+        # _blend_velocity), weighted by real vision-retrieval distance.
+        #
+        # lamda=3.0, NOT the discrete FAST case's lamda=10.0: a real measurement
+        # across 160 real query/neighbor pairs (4 tasks, excluded-episode top-1
+        # retrieval) found lamda=10.0 makes this mechanism nearly inert on this
+        # dataset's actual distance scale -- median exp_lamda_distance=0.018,
+        # max=0.154 across every pair measured, frac>0.5 == 0.000 in every task.
+        # Real normalized top-1 distances cluster around 0.3-0.4 of each task's own
+        # max pairwise distance (not near 0), so exp(-10*0.4)=0.018 -- the decay is
+        # simply too steep for this scale. lamda=3.0 instead gives weight~=0.43 for
+        # the closest ~10% of real neighbors, ~=0.30 at the real median, ~=0.05 for
+        # the farthest -- a real, meaningful dynamic range grounded in this
+        # dataset's own measured distances, not a blind carryover from a different
+        # mechanism/distance scale. Still just a starting point: the "right" target
+        # dynamic range is a genuine design choice, best confirmed by actual
+        # training behavior, not re-derived here.
+        #
+        # precomputed_context_dir points at a NEW directory
+        # (not yet built) -- the existing ctx3cam precompute output has neither
+        # discrete nor continuous interpolation extras, so a fresh precompute run
+        # (--use-continuous-action-interpolation) is required before this can train
+        # off precomputed context; smoke-testable now via live retrieval only
+        # (override precomputed_context_dir=None, same pattern as every other
+        # arm's pre-precompute smoke test this session).
+        name="yor_icl_victr_vision_interp_canonical_ctx3cam",
+        model=pi0_victr.Pi0VictrConfig(
+            pi05=True,
+            action_horizon=30,
+            retrieval_metric="vision",
+            num_context_chunks=1,
+            context_frames_per_chunk=3,
+            context_text_max_length=256,
+            use_action_interpolation=True,
+            lamda=3.0,
+        ),
+        data=LeRobotYorVictrCanonicalDataConfig(
+            repo_id="icl-dataset",
+            root="/scratch/lim2045/icl_ws/icl-dataset-fixed-obs",
+            assets=AssetsConfig(assets_dir="assets/yor_icl_pi05_canonical_extended"),
+            base_config=DataConfig(prompt_from_task=True),
+            retrieval_metric="vision",
+            episodes_path="assets/yor_icl_canonical_extended_episodes.json",
+            task_prompt_overrides=YOR_EXPANDED_TASK_PROMPT_OVERRIDES,
+            pool_dir="assets/victr_icl_pool_canonical_3cam_224",
+            precomputed_context_dir=(
+                "/scratch/lim2045/icl_ws/viktr/outputs/victr/retrieval_context_canonical_3cam_k1_interp"
+            ),
+            use_continuous_action_interpolation=True,
+            lamda=3.0,
             context_camera_keys=(
                 "observation.images.zed",
                 "observation.images.fish0",
