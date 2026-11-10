@@ -124,28 +124,6 @@ class Observation(Generic[ArrayT]):
     context_tokens: at.Int[ArrayT, "*b k cl"] | None = None
     context_tokens_mask: at.Bool[ArrayT, "*b k cl"] | None = None
 
-    # Knowledge Insulation fields (openpi.models.pi0_ki.Pi0Ki only; every other model
-    # ignores these). Pre-tokenized discrete targets for the two auxiliary next-token
-    # CE losses that keep training the PaliGemma backbone while the flow-matching loss
-    # is insulated from it (openpi.policies.yor_ki.KiTargetInputs builds these at
-    # data-loading time: FAST-tokenizing actions and looking up subtask text are both
-    # non-jittable host-side work).
-    # [bos, "Action: ", <FAST-tokenized action chunk>, "|"], remapped into PaliGemma vocab.
-    # Own "fl" axis symbol (see context_tokens' comment above -- this length, e.g. 256,
-    # differs from both the prompt length and the subtask-text length below).
-    fast_action_tokens: at.Int[ArrayT, "*b fl"] | None = None
-    fast_action_tokens_mask: at.Bool[ArrayT, "*b fl"] | None = None
-    # Current subtask's text (gap-backfilled VLM annotation), tokenized with the plain
-    # PaliGemma tokenizer. Own "sl" axis symbol, same reasoning.
-    subtask_tokens: at.Int[ArrayT, "*b sl"] | None = None
-    subtask_tokens_mask: at.Bool[ArrayT, "*b sl"] | None = None
-
-    # Reward-Aligned Behavior Cloning per-item loss weight (notes/reward_aligned_bc.md,
-    # openpi.policies.yor_rabc.RabcWeightInputs). Only read by scripts/train.py's
-    # loss_fn when present; every model ignores it, same no-op-everywhere-else pattern
-    # as context_images/subtask_tokens above.
-    rabc_weight: at.Float[ArrayT, "*b"] | None = None
-
     # RICL-style action-interpolation fields (openpi.models.pi0_fast_victr.Pi0FastVictr
     # only, when its use_action_interpolation config flag is set; see
     # notes/action_interpolation.md). Reproduces arXiv:2508.02062's discrete blend of
@@ -155,7 +133,7 @@ class Observation(Generic[ArrayT]):
     exp_lamda_distance: at.Float[ArrayT, "*b"] | None = None
     # The nearest retrieved chunk's own actions, tokenized with the same
     # FASTTokenizer.tokenize_action_only convention as the query -- own "nl" axis
-    # symbol, same reasoning as context_tokens/fast_action_tokens above.
+    # symbol, same reasoning as context_tokens above.
     nearest_action_tokens: at.Int[ArrayT, "*b nl"] | None = None
     nearest_action_tokens_mask: at.Bool[ArrayT, "*b nl"] | None = None
 
@@ -197,11 +175,6 @@ class Observation(Generic[ArrayT]):
             context_image_masks=data.get("context_image_masks"),
             context_tokens=data.get("context_tokens"),
             context_tokens_mask=data.get("context_tokens_mask"),
-            fast_action_tokens=data.get("fast_action_tokens"),
-            fast_action_tokens_mask=data.get("fast_action_tokens_mask"),
-            subtask_tokens=data.get("subtask_tokens"),
-            subtask_tokens_mask=data.get("subtask_tokens_mask"),
-            rabc_weight=data.get("rabc_weight"),
             exp_lamda_distance=data.get("exp_lamda_distance"),
             nearest_action_tokens=data.get("nearest_action_tokens"),
             nearest_action_tokens_mask=data.get("nearest_action_tokens_mask"),
@@ -292,13 +265,8 @@ def preprocess_observation(
         context_image_masks=observation.context_image_masks,
         context_tokens=observation.context_tokens,
         context_tokens_mask=observation.context_tokens_mask,
-        # Passed through unmodified: discrete-loss targets, not something augmentation
+        # Passed through unmodified: interpolation targets, not something augmentation
         # touches.
-        fast_action_tokens=observation.fast_action_tokens,
-        fast_action_tokens_mask=observation.fast_action_tokens_mask,
-        subtask_tokens=observation.subtask_tokens,
-        subtask_tokens_mask=observation.subtask_tokens_mask,
-        # Passed through unmodified: same reasoning as fast_action_tokens above.
         exp_lamda_distance=observation.exp_lamda_distance,
         nearest_action_tokens=observation.nearest_action_tokens,
         nearest_action_tokens_mask=observation.nearest_action_tokens_mask,

@@ -28,9 +28,6 @@ import openpi.training.sharding as sharding
 import openpi.training.utils as training_utils
 import openpi.training.weight_loaders as _weight_loaders
 
-# Matches the SARM paper's epsilon (Sec 3.2, Eq. 7) -- avoids a division by zero if an
-# entire batch's RA-BC weights happen to be 0.
-RABC_EPSILON = 1e-6
 
 
 def init_logging():
@@ -155,12 +152,6 @@ def train_step(
     ):
         chunked_loss = model.compute_loss(rng, observation, actions, train=True)
         per_item_loss = jnp.mean(chunked_loss, axis=-1)
-        if observation.rabc_weight is not None:
-            # Reward-Aligned Behavior Cloning (notes/reward_aligned_bc.md, Eq. 7):
-            # weighted mean instead of a plain mean, weight precomputed offline by
-            # scripts/precompute_rabc_weights.py and looked up per-item by
-            # openpi.policies.yor_rabc.RabcWeightInputs.
-            return jnp.sum(observation.rabc_weight * per_item_loss) / (jnp.sum(observation.rabc_weight) + RABC_EPSILON)
         return jnp.mean(per_item_loss)
 
     train_rng = jax.random.fold_in(rng, state.step)

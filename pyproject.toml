@@ -14,7 +14,7 @@ dependencies = [
     "flax==0.10.2",
     "fsspec[gcs]>=2024.6.0",
     # dropped: unused (no references under src/ or scripts/) and its `mujoco` pin fails
-    # to build here (needs MUJOCO_PATH / a system mujoco install this cluster lacks).
+    # to build without a system MuJoCo install (MUJOCO_PATH).
     # "gym-aloha>=0.1.1",
     "imageio>=2.36.1",
     "jax[cuda12]==0.5.3",
@@ -65,8 +65,8 @@ dev = [
 ]
 
 [tool.uv]
-# This project only ever runs on the HPC cluster (Linux x86_64, CUDA via
-# jax[cuda12]/torch); restricting resolution to that platform avoids uv having to
+# VICTR training is supported on Linux x86_64 with CUDA only (jax[cuda12]/torch);
+# restricting resolution to that platform avoids uv having to
 # find a universally-satisfiable lock across irrelevant platforms (aarch64, macOS)
 # whose own transitive constraints (e.g. lerobot's aarch64-specific torchcodec
 # pin) would otherwise conflict with pins below.

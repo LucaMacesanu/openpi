@@ -79,8 +79,7 @@ class FASTTokenizer:
             # outliers beyond q01/q99 legitimately land outside [-1, 1] -- the FAST
             # tokenizer's DCT+chr()-based encoding isn't robust to that (chr() raises
             # ValueError for a large enough codepoint), so a rare outlier action can crash
-            # training. Clip here, mirroring yor_ki.KiTargetInputs' own clip for its
-            # separate FAST-tokenized consumer of the same unclipped Normalize output.
+            # training. Clip here.
             actions = np.clip(actions, -1.0, 1.0)
             # Tokenize actions with FAST tokenizer --> map to last tokens in PaliGemma vocab
             action_tokens = self._fast_tokenizer(actions[None])[0]

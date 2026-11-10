@@ -96,10 +96,6 @@ class YorInputs(transforms.DataTransformFn):
             "context_image_masks",
             "context_tokens",
             "context_tokens_mask",
-            "fast_action_tokens",
-            "fast_action_tokens_mask",
-            "subtask_tokens",
-            "subtask_tokens_mask",
             "nearest_action_tokens",
             "nearest_action_tokens_mask",
             "nearest_action",
@@ -132,83 +128,6 @@ class YorOutputs(transforms.DataTransformFn):
 _LEFT_QUAT, _LEFT_POS = slice(0, 4), slice(4, 7)
 _RIGHT_QUAT, _RIGHT_POS = slice(7, 11), slice(11, 14)
 _LEFT_GRIP, _RIGHT_GRIP = slice(14, 15), slice(15, 16)
-
-
-@dataclasses.dataclass(frozen=True)
-class YorInputsAbsoluteJoint(transforms.DataTransformFn):
-    """Absolute-joint-space variant: both state AND action are icl-dataset's 15-dim
-    observation.state (left/right arm joints (7+7) + lift) -- unlike YorInputs' 20-dim
-    EE-pose action, this trains the model to predict future absolute joint positions
-    directly. icl-dataset never recorded a joint-space *action* (teleop commands EE
-    poses; raw_action.* has no joint equivalent) -- the only joint-space signal on
-    disk is observation.state, measured per frame. So the "action" here is literally
-    the future window of observation.state itself: LeRobotYorAbsoluteJointDataConfig
-    sets action_sequence_keys=("observation.state",), which makes data_loader.py's
-    delta_timestamps fetch an (action_horizon, 15) window of observation.state instead
-    of the usual single current frame.
-
-    Because action_sequence_keys and the current-state input share the SAME dataset
-    column name here (there is no separate column to key them apart), the fetched
-    value's rank tells them apart: at inference (real robot serving, no
-    action_sequence_keys windowing applied) data["observation.state"] is a plain
-    (15,) vector; during training it comes back windowed as (action_horizon, 15). The
-    window's own first row is exactly "now" (delta_timestamps starts at t=0), so it
-    doubles as the current-state input -- no extra lookback/lookahead frame needed
-    beyond what data_loader.py already fetches.
-
-    No zeroing/dropping needed (unlike YorInputs' base_vel/lift_cmd fix): state has no
-    near-constant-zero dims to begin with, every one of the 15 is a real joint/lift
-    reading."""
-
-    def __call__(self, data: dict) -> dict:
-        images = {
-            "base_0_rgb": _parse_image(data["observation.images.zed"]),
-            "left_wrist_0_rgb": _parse_image(data["observation.images.fish0"]),
-            "right_wrist_0_rgb": _parse_image(data["observation.images.fish1"]),
-        }
-        image_masks = {name: np.True_ for name in images}
-
-        state_field = np.asarray(data["observation.state"])
-        inputs = {
-            "state": state_field[0] if state_field.ndim > 1 else state_field,
-            "image": images,
-            "image_mask": image_masks,
-        }
-        if state_field.ndim > 1:
-            inputs["actions"] = state_field.astype(np.float32)
-
-        if "prompt" in data:
-            if isinstance(data["prompt"], bytes):
-                data["prompt"] = data["prompt"].decode("utf-8")
-            inputs["prompt"] = data["prompt"]
-
-        for key in (
-            "context_images",
-            "context_image_masks",
-            "context_tokens",
-            "context_tokens_mask",
-            "fast_action_tokens",
-            "fast_action_tokens_mask",
-            "subtask_tokens",
-            "subtask_tokens_mask",
-            "nearest_action_tokens",
-            "nearest_action_tokens_mask",
-            "nearest_action",
-            "exp_lamda_distance",
-        ):
-            if key in data:
-                inputs[key] = data[key]
-
-        return inputs
-
-
-@dataclasses.dataclass(frozen=True)
-class YorOutputsAbsoluteJoint(transforms.DataTransformFn):
-    """Inverse of YorInputsAbsoluteJoint: unpads the model's 32-dim output back to the
-    15-dim [left arm(7), right arm(7), lift(1)] absolute joint-position layout."""
-
-    def __call__(self, data: dict) -> dict:
-        return {"actions": np.asarray(data["actions"][..., :15])}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -275,10 +194,6 @@ class YorInputsDeltaRot6D(transforms.DataTransformFn):
             "context_image_masks",
             "context_tokens",
             "context_tokens_mask",
-            "fast_action_tokens",
-            "fast_action_tokens_mask",
-            "subtask_tokens",
-            "subtask_tokens_mask",
             "nearest_action_tokens",
             "nearest_action_tokens_mask",
             "nearest_action",
@@ -304,180 +219,6 @@ class YorOutputsDeltaRot6D(transforms.DataTransformFn):
     own current end-effector position (not tracked anywhere in this policy's
     observation, which only carries joint-space state) to add the delta onto before
     sending to the robot."""
-
-    def __call__(self, data: dict) -> dict:
-        action = np.asarray(data["actions"])[..., :20]
-        left_delta_pos, left_rot6d, left_grip = action[..., 0:3], action[..., 3:9], action[..., 9:10]
-        right_delta_pos, right_rot6d, right_grip = action[..., 10:13], action[..., 13:19], action[..., 19:20]
-        left_quat = yor_rotation.rot6d_to_quat_wxyz(left_rot6d)
-        right_quat = yor_rotation.rot6d_to_quat_wxyz(right_rot6d)
-        return {
-            "actions": np.concatenate(
-                [left_quat, left_delta_pos, right_quat, right_delta_pos, left_grip, right_grip], axis=-1
-            )
-        }
-
-
-@dataclasses.dataclass(frozen=True)
-class YorInputsAlignedQ(transforms.DataTransformFn):
-    """Absolute-joint-space variant with a REAL recorded action, unlike
-    YorInputsAbsoluteJoint's reused-future-state hack: icl-dataset-fixed-action's
-    action.q_target (14-dim: left/right arm joints, IK-reconstructed from
-    action.left_ee/action.right_ee and anchored per-episode to
-    observation.state's own FK, see that dataset's README) is a genuine action
-    column, aligned with observation.state's joint space. State is
-    icl-dataset's 15-dim observation.state with the lift dim (index 14)
-    dropped -- 14-dim [lj0..lj6, rj0..rj6] -- since neither q_target nor
-    action.q_target's paired lift/base signal exists to keep proprioception
-    and action genuinely in the same space (icl-dataset's action column has no
-    base component at all; lift_cmd is dropped from the action side too, see
-    below). Action is action.q_target (14) with gripper appended (2, from the
-    raw 20-dim "action" column's _LEFT_GRIP/_RIGHT_GRIP dims 14:16 -- q_target
-    itself has no gripper channel), giving a 16-dim
-    [lj0..lj6, rj0..rj6, left_grip, right_grip] action -- no lift_cmd/base_vel
-    (raw action dims 16:20), fetched via LeRobotYorAlignedQDataConfig's
-    action_sequence_keys=("action.q_target", "action"). Unlike
-    YorInputsAbsoluteJoint, no rank trick is needed to tell current state
-    apart from the action window -- they're different dataset columns."""
-
-    def __call__(self, data: dict) -> dict:
-        images = {
-            "base_0_rgb": _parse_image(data["observation.images.zed"]),
-            "left_wrist_0_rgb": _parse_image(data["observation.images.fish0"]),
-            "right_wrist_0_rgb": _parse_image(data["observation.images.fish1"]),
-        }
-        image_masks = {name: np.True_ for name in images}
-
-        # Drop lift (index 14) -- state has no base component to begin with, and
-        # action.q_target's action space has neither lift nor base, so keep state
-        # aligned to arms-only (see class docstring).
-        state = np.asarray(data["observation.state"])[..., :14]
-        inputs = {
-            "state": state,
-            "image": images,
-            "image_mask": image_masks,
-        }
-
-        if "action.q_target" in data:
-            q_target = np.asarray(data["action.q_target"], dtype=np.float32)
-            action = np.asarray(data["action"], dtype=np.float32)
-            inputs["actions"] = np.concatenate(
-                [q_target, action[..., _LEFT_GRIP], action[..., _RIGHT_GRIP]], axis=-1
-            )
-
-        if "prompt" in data:
-            if isinstance(data["prompt"], bytes):
-                data["prompt"] = data["prompt"].decode("utf-8")
-            inputs["prompt"] = data["prompt"]
-
-        for key in (
-            "context_images",
-            "context_image_masks",
-            "context_tokens",
-            "context_tokens_mask",
-            "fast_action_tokens",
-            "fast_action_tokens_mask",
-            "subtask_tokens",
-            "subtask_tokens_mask",
-            "nearest_action_tokens",
-            "nearest_action_tokens_mask",
-            "nearest_action",
-            "exp_lamda_distance",
-        ):
-            if key in data:
-                inputs[key] = data[key]
-
-        return inputs
-
-
-@dataclasses.dataclass(frozen=True)
-class YorOutputsAlignedQ(transforms.DataTransformFn):
-    """Inverse of YorInputsAlignedQ: unpads the model's 32-dim output back to
-    the 16-dim [left arm(7), right arm(7), left_grip(1), right_grip(1)] layout."""
-
-    def __call__(self, data: dict) -> dict:
-        return {"actions": np.asarray(data["actions"][..., :16])}
-
-
-@dataclasses.dataclass(frozen=True)
-class YorInputsAlignedDeltaRot6D(transforms.DataTransformFn):
-    """YorInputsDeltaRot6D, but state is icl-dataset-fixed-obs's
-    observation.left_ee/observation.right_ee (absolute EE pose, quat+xyz per
-    arm, FK'd from the real joint encoders, quaternion-hemisphere-corrected)
-    instead of observation.state (joint space) -- aligns proprioception with
-    the EE-space delta-position + absolute-rot6d-orientation action
-    YorInputsDeltaRot6D already computes (see that class's docstring for the
-    action math, unchanged here), instead of mixing joint-space state with
-    EE-space action. State is 14-dim: [left qw,qx,qy,qz,x,y,z, right
-    qw,qx,qy,qz,x,y,z]."""
-
-    def __call__(self, data: dict) -> dict:
-        images = {
-            "base_0_rgb": _parse_image(data["observation.images.zed"]),
-            "left_wrist_0_rgb": _parse_image(data["observation.images.fish0"]),
-            "right_wrist_0_rgb": _parse_image(data["observation.images.fish1"]),
-        }
-        image_masks = {name: np.True_ for name in images}
-
-        state = np.concatenate(
-            [np.asarray(data["observation.left_ee"]), np.asarray(data["observation.right_ee"])],
-            axis=-1,
-        )
-        inputs = {
-            "state": state,
-            "image": images,
-            "image_mask": image_masks,
-        }
-
-        if "action" in data:
-            action = np.asarray(data["action"], dtype=np.float64)  # (horizon, 20)
-
-            left_delta_pos = action[..., _LEFT_POS] - action[..., 0:1, _LEFT_POS]
-            right_delta_pos = action[..., _RIGHT_POS] - action[..., 0:1, _RIGHT_POS]
-            left_rot6d = yor_rotation.quat_wxyz_to_rot6d(action[..., _LEFT_QUAT])
-            right_rot6d = yor_rotation.quat_wxyz_to_rot6d(action[..., _RIGHT_QUAT])
-
-            inputs["actions"] = np.concatenate(
-                [
-                    left_delta_pos,
-                    left_rot6d,
-                    action[..., _LEFT_GRIP],
-                    right_delta_pos,
-                    right_rot6d,
-                    action[..., _RIGHT_GRIP],
-                ],
-                axis=-1,
-            ).astype(np.float32)
-
-        if "prompt" in data:
-            if isinstance(data["prompt"], bytes):
-                data["prompt"] = data["prompt"].decode("utf-8")
-            inputs["prompt"] = data["prompt"]
-
-        for key in (
-            "context_images",
-            "context_image_masks",
-            "context_tokens",
-            "context_tokens_mask",
-            "fast_action_tokens",
-            "fast_action_tokens_mask",
-            "subtask_tokens",
-            "subtask_tokens_mask",
-            "nearest_action_tokens",
-            "nearest_action_tokens_mask",
-            "nearest_action",
-            "exp_lamda_distance",
-        ):
-            if key in data:
-                inputs[key] = data[key]
-
-        return inputs
-
-
-@dataclasses.dataclass(frozen=True)
-class YorOutputsAlignedDeltaRot6D(transforms.DataTransformFn):
-    """Identical to YorOutputsDeltaRot6D -- action encoding is unchanged, only
-    YorInputsAlignedDeltaRot6D's state source differs."""
 
     def __call__(self, data: dict) -> dict:
         action = np.asarray(data["actions"])[..., :20]
@@ -569,10 +310,6 @@ class YorInputsCanonical(transforms.DataTransformFn):
             "context_image_masks",
             "context_tokens",
             "context_tokens_mask",
-            "fast_action_tokens",
-            "fast_action_tokens_mask",
-            "subtask_tokens",
-            "subtask_tokens_mask",
             "nearest_action_tokens",
             "nearest_action_tokens_mask",
             "nearest_action",

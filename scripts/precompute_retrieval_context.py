@@ -30,7 +30,7 @@ _assign_tasks_to_shards -- each shard skips episodes whose output already exists
     third_party/openpi/.venv/bin/python3 third_party/openpi/scripts/precompute_retrieval_context.py \
         --pool-dir third_party/openpi/assets/victr_icl_pool_expanded_224 \
         --all-episodes-json outputs/victr/icl_pool_expanded/all_episodes.json \
-        --icl-dataset-root /scratch/lim2045/icl_ws/icl-dataset \
+        --icl-dataset-root third_party/openpi/data/icl-dataset-fixed-obs \
         --out-dir outputs/victr/retrieval_context_expanded \
         --metric vision \
         --num-shards 16 --shard-index 0

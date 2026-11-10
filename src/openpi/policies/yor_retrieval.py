@@ -532,8 +532,7 @@ def _action_only_tokenizer(fast_tokenizer_path: str, max_action_tokens: int) -> 
     """Same FASTTokenizer convention (and, when fast_tokenizer_path matches, the same
     fitted tokenizer) the query's own actions go through -- see
     Pi0FastVictrConfig.fast_model_tokenizer_kwargs. Used only for action-interpolation's
-    nearest-chunk target, via tokenize_action_only (also used by
-    openpi.policies.yor_ki.KiTargetInputs)."""
+    nearest-chunk target, via tokenize_action_only."""
     return _tokenizer.FASTTokenizer(max_len=max_action_tokens, fast_tokenizer_path=fast_tokenizer_path)
 
 
